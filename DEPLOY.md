@@ -60,20 +60,6 @@ worth setting on the target machine:
 - Recordings and the database live at
   `~/Library/Application Support/Bandwatch/` on that machine.
 
-## Why not notarized (and how to change that later)
-
-Notarization would remove step 2 entirely — the app would open with a normal
-double-click on any Mac. It requires:
-
-1. An **Apple Developer account** ($99/year).
-2. Signing with a **Developer ID Application** certificate instead of ad-hoc.
-3. Submitting the app to Apple's notary service (`xcrun notarytool submit`) and
-   stapling the ticket (`xcrun stapler staple`).
-
-None of that changes the app's code — it's purely a signing/distribution step.
-If you decide to distribute Bandwatch more widely, that's the upgrade path, and
-`package-app.sh` is where the signing step would change.
-
 ## Note on microphone permission and re-signing
 
 macOS ties microphone permission to bundle ID **plus** code signature. Because
