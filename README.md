@@ -50,7 +50,14 @@ a landlord, council, or mediator.
 
 ## Build & run
 
-Requires **macOS 15+** and a Swift 6.3+ toolchain. No external dependencies.
+**Prefer a ready-to-run app?** Each [release](https://github.com/Dilcue/Bandwatch/releases/latest)
+ships a prebuilt `Bandwatch.app` inside `Bandwatch-<version>-universal.zip` — a
+universal (Apple Silicon + Intel), ad-hoc-signed build. Download it, unzip, and
+follow the one-time Gatekeeper step in [DEPLOY.md](DEPLOY.md); no toolchain
+needed.
+
+To build from source instead, you need **macOS 15+** and a Swift 6.3+ toolchain.
+No third-party dependencies — only Apple's system frameworks.
 
 ```bash
 swift build
