@@ -27,6 +27,12 @@ jobs:
       - name: Run tests
         run: swift test
 
+      - name: Stamp bundle version from the tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          plutil -replace CFBundleShortVersionString -string "$VERSION" Resources/Info.plist
+          echo "Bundle version set to $VERSION (so the app version and the zip name match the tag)"
+
       - name: Build universal package
         run: ./scripts/package-app.sh
 
