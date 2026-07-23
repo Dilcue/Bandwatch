@@ -1,0 +1,66 @@
+name: Release
+
+# Cut a release by pushing a tag, e.g.:
+#   git tag v0.2.0 && git push origin v0.2.0
+# This builds the universal (Apple Silicon + Intel) .app, zips it, and attaches
+# it to the release for that tag (creating the release if it doesn't exist yet).
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # needed to create/upload the release
+
+jobs:
+  build-and-release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Run tests
+        run: swift test
+
+      - name: Build universal package
+        run: ./scripts/package-app.sh
+
+      - name: Publish release with binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          ASSET="dist/Bandwatch-${VERSION}-universal.zip"
+          test -f "$ASSET" || { echo "expected asset not found: $ASSET"; ls -la dist; exit 1; }
+
+          NOTES="$(cat <<EOF
+          Universal build (Apple Silicon + Intel) of Bandwatch. Requires macOS 15 (Sequoia) or newer.
+
+          ## Install
+          1. Download \`Bandwatch-${VERSION}-universal.zip\` below, unzip it, and move \`Bandwatch.app\` to \`/Applications\`.
+          2. It is ad-hoc signed (not notarized), so on first open macOS blocks it. Either run:
+             \`\`\`
+             xattr -dr com.apple.quarantine /Applications/Bandwatch.app
+             \`\`\`
+             or try to open it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**.
+          3. Launch it and grant microphone access.
+
+          Prefer no warning at all? Build from source: \`git clone\` this repo and run \`./scripts/run.sh\`.
+          See DEPLOY.md for details.
+          EOF
+          )"
+
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME exists — uploading asset"
+            gh release upload "$GITHUB_REF_NAME" "$ASSET" --clobber
+          else
+            echo "Creating release $GITHUB_REF_NAME"
+            gh release create "$GITHUB_REF_NAME" "$ASSET" \
+              --title "Bandwatch ${VERSION}" --notes "$NOTES"
+          fi

@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP="$ROOT/build/Bandwatch.app"
 
 echo "==> Building ($CONFIG)"
-. "$HOME/.swiftly/env.sh"
+if [ -f "$HOME/.swiftly/env.sh" ]; then . "$HOME/.swiftly/env.sh"; fi
 swift build -c "$CONFIG" --package-path "$ROOT"
 
 BIN="$ROOT/.build/$CONFIG/Bandwatch"

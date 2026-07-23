@@ -11,7 +11,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
 APP="$DIST/Bandwatch.app"
 
-. "$HOME/.swiftly/env.sh"
+# Use the swiftly-managed toolchain locally; on CI (no swiftly) fall back to the
+# runner's Swift, which the swift-tools-version 6.0 package builds fine with.
+if [ -f "$HOME/.swiftly/env.sh" ]; then . "$HOME/.swiftly/env.sh"; fi
 BINPATH="$(swift build -c release --show-bin-path)"
 
 echo "==> Building arm64 (native)"
