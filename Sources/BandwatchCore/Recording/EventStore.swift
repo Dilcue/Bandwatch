@@ -1,0 +1,491 @@
+import Foundation
+import SQLite3
+
+/// SQLite is available from the system without any package dependency.
+/// Verified: version 3.51.0 on this machine.
+
+public enum GapReason: String, Sendable, CaseIterable {
+    case deviceLost = "device_lost"
+    case writeFailure = "write_failure"
+    case diskFull = "disk_full"
+    case shutdown = "shutdown"
+    case captureStalled = "capture_stalled"
+    case noSignal = "no_signal"
+    /// A window of archive audio was dropped by the bounded, backpressured
+    /// delivery stream between `MonitoringSession`'s analysis loop and
+    /// `RecordingCoordinator` (a stalled disk that could not keep up) --
+    /// see `RecordingCoordinator.noteArchiveWindowDropped(at:)`. Distinct
+    /// from `.writeFailure`: a write failure means a write was attempted
+    /// and failed, while this means the audio never reached a write
+    /// attempt at all, and the archive segment it would have gone into now
+    /// has a splice a naive reader would not detect from the filename or
+    /// duration alone.
+    case archiveWindowDropped = "archive_window_dropped"
+    /// Fallback for a reason string this build doesn't recognise — e.g. a row
+    /// written by a future version with a new reason. Never inferred as
+    /// `.shutdown`: that would misreport a possibly non-benign gap as a
+    /// deliberate, benign one in a dataset whose purpose is proving coverage
+    /// was continuous.
+    case unknown = "unknown"
+}
+
+public struct EventRecord: Equatable, Sendable {
+    public let id: Int64
+    public let startedAt: Date
+    public let durationSec: Double
+    public let peakDBFS: Double
+    public let meanDBFS: Double
+    public let bandLowHz: Double
+    public let bandHighHz: Double
+    public let thresholdDBFS: Double
+    public let deviceUID: String
+    public let clipPath: String
+}
+
+public struct GapRecord: Equatable, Sendable {
+    public let id: Int64
+    public let startedAt: Date
+    public let endedAt: Date?
+    public let reason: GapReason
+}
+
+public struct SpanRecord: Equatable, Sendable {
+    public let id: Int64
+    public let startedAt: Date
+    public let endedAt: Date
+}
+
+public enum EventStoreError: Error, Equatable {
+    case couldNotOpen(String)
+    case sqlFailed(String)
+}
+
+/// Number of events on a single calendar day, for the Review feature's
+/// events-per-day chart. A day with zero events is simply absent from the
+/// result rather than represented with `count == 0` — see
+/// `EventStore.eventCountsByDay(from:to:)`.
+public struct DailyCount: Equatable, Sendable {
+    public let day: String    // yyyy-MM-dd, in the store's timezone
+    public let count: Int
+}
+
+/// Coverage summary over a date range, for the Review feature's totals.
+public struct CoverageTotals: Equatable, Sendable {
+    public let monitoredSeconds: Double
+    public let gapSeconds: Double
+    public let gapCount: Int
+}
+
+/// The event log and the coverage-gap log.
+///
+/// Not thread-safe and not Sendable — used only from inside
+/// `RecordingCoordinator`, which provides isolation.
+///
+/// Levels are stored raw (dBFS). A future SPL calibration is applied as a
+/// display-time offset, never baked into stored values, so historical rows
+/// become SPL-readable retroactively. Band and threshold are stored per event
+/// so old rows stay interpretable after settings change.
+public final class EventStore {
+    private var db: OpaquePointer?
+
+    // Not `static`: the formatter is timezone-pinned per instance (see
+    // `init(url:timeZone:)`), so it can't be shared across instances that
+    // might be configured with different zones. `EventStore` itself is
+    // documented as not Sendable and used only from within a single actor's
+    // isolation (RecordingCoordinator), so a non-Sendable stored property is
+    // safe here.
+    private let iso: ISO8601DateFormatter
+
+    private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+    /// - Parameter timeZone: The zone `started_at`/`ended_at` are rendered
+    ///   in, with an explicit UTC offset (e.g. `-05:00`) rather than `Z`, so a
+    ///   stored row reads consistently with the local-time-plus-offset
+    ///   filenames `RecordingPaths` produces for the same instant. Defaults
+    ///   to the host's current zone, like `RecordingPaths`; tests can pin a
+    ///   zone instead of depending on the machine's setting.
+    public init(url: URL, timeZone: TimeZone = .current) throws {
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = timeZone
+        formatter.formatOptions = [.withInternetDateTime, .withTimeZone]
+        self.iso = formatter
+
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        guard sqlite3_open(url.path, &db) == SQLITE_OK else {
+            let msg = db.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
+            throw EventStoreError.couldNotOpen(msg)
+        }
+        try exec("PRAGMA journal_mode=WAL;")
+        try createEventsAndGapsSchema()
+        try exec("""
+        CREATE TABLE IF NOT EXISTS monitoring_spans (
+            id         INTEGER PRIMARY KEY,
+            started_at TEXT NOT NULL,
+            ended_at   TEXT NOT NULL
+        );
+        """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_spans_started_at ON monitoring_spans(started_at);")
+    }
+
+    /// Test-only: builds the pre-feature schema (events + gaps, NO monitoring_spans)
+    /// to exercise the migration and read-only table-absence paths. Not used in production.
+    init(legacyNoSpansURL url: URL, timeZone: TimeZone = .current) throws {
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = timeZone
+        formatter.formatOptions = [.withInternetDateTime, .withTimeZone]
+        self.iso = formatter
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard sqlite3_open(url.path, &db) == SQLITE_OK else {
+            let msg = db.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
+            throw EventStoreError.couldNotOpen(msg)
+        }
+        try exec("PRAGMA journal_mode=WAL;")
+        try createEventsAndGapsSchema()
+    }
+
+    private func createEventsAndGapsSchema() throws {
+        try exec("""
+        CREATE TABLE IF NOT EXISTS events (
+            id             INTEGER PRIMARY KEY,
+            started_at     TEXT NOT NULL,
+            duration_sec   REAL NOT NULL,
+            peak_dbfs      REAL NOT NULL,
+            mean_dbfs      REAL NOT NULL,
+            band_low_hz    REAL NOT NULL,
+            band_high_hz   REAL NOT NULL,
+            threshold_dbfs REAL NOT NULL,
+            device_uid     TEXT NOT NULL,
+            clip_path      TEXT NOT NULL
+        );
+        """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_events_started_at ON events(started_at);")
+        try exec("""
+        CREATE TABLE IF NOT EXISTS gaps (
+            id         INTEGER PRIMARY KEY,
+            started_at TEXT NOT NULL,
+            ended_at   TEXT,
+            reason     TEXT NOT NULL
+        );
+        """)
+    }
+
+    /// Opens the database read-only for the Review feature, so it can
+    /// inspect a database it is not recording into (and cannot mutate it
+    /// even by accident). A read-only connection permits neither DDL nor
+    /// PRAGMA, so unlike `init(url:timeZone:)` this runs no schema setup —
+    /// the database must already exist, created by a prior writable
+    /// `EventStore`, and already be in WAL mode (set by that writer), which
+    /// is what allows this connection to read concurrently with it.
+    public init(readOnlyURL url: URL, timeZone: TimeZone = .current) throws {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = timeZone
+        self.iso = formatter
+
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw EventStoreError.couldNotOpen("no database at \(url.path)")
+        }
+        guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            let msg = db.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
+            throw EventStoreError.couldNotOpen(msg)
+        }
+        // No CREATE TABLE, no PRAGMA — a read-only connection permits neither.
+    }
+
+    public func close() {
+        if let db { sqlite3_close(db) }
+        db = nil
+    }
+
+    // MARK: Events
+
+    /// - Parameter clipPath: The location a clip would live at, not a
+    ///   promise that a file exists there. A detection is real evidence even
+    ///   when its clip is too short to write (see
+    ///   `SegmentWriter.minimumReadableFrames`), so `RecordingCoordinator`
+    ///   still inserts a row for it — `clip_path` records the expected
+    ///   location so the gap is visible on inspection
+    ///   (`FileManager.fileExists` returns false) rather than silently
+    ///   implying audio that was never written. Callers reading this column
+    ///   must check for the file's existence rather than assuming it.
+    public func insertEvent(startedAt: Date, durationSec: Double, peakDBFS: Double,
+                            meanDBFS: Double, band: FrequencyBand, thresholdDBFS: Double,
+                            deviceUID: String, clipPath: String) throws -> Int64 {
+        let sql = """
+        INSERT INTO events (started_at, duration_sec, peak_dbfs, mean_dbfs,
+                            band_low_hz, band_high_hz, threshold_dbfs, device_uid, clip_path)
+        VALUES (?,?,?,?,?,?,?,?,?);
+        """
+        let st = try prepare(sql)
+        defer { sqlite3_finalize(st) }
+        sqlite3_bind_text(st, 1, iso.string(from: startedAt), -1, Self.transient)
+        sqlite3_bind_double(st, 2, durationSec)
+        sqlite3_bind_double(st, 3, peakDBFS)
+        sqlite3_bind_double(st, 4, meanDBFS)
+        sqlite3_bind_double(st, 5, band.lowHz)
+        sqlite3_bind_double(st, 6, band.highHz)
+        sqlite3_bind_double(st, 7, thresholdDBFS)
+        sqlite3_bind_text(st, 8, deviceUID, -1, Self.transient)
+        sqlite3_bind_text(st, 9, clipPath, -1, Self.transient)
+        guard sqlite3_step(st) == SQLITE_DONE else { throw sqlError() }
+        return sqlite3_last_insert_rowid(db)
+    }
+
+    public func allEvents() throws -> [EventRecord] {
+        try readEvents("SELECT id,started_at,duration_sec,peak_dbfs,mean_dbfs,band_low_hz,band_high_hz,threshold_dbfs,device_uid,clip_path FROM events ORDER BY started_at ASC;", bind: nil)
+    }
+
+    public func events(from: Date, to: Date) throws -> [EventRecord] {
+        try readEvents("SELECT id,started_at,duration_sec,peak_dbfs,mean_dbfs,band_low_hz,band_high_hz,threshold_dbfs,device_uid,clip_path FROM events WHERE started_at >= ? AND started_at <= ? ORDER BY started_at ASC;") { st in
+            sqlite3_bind_text(st, 1, self.iso.string(from: from), -1, Self.transient)
+            sqlite3_bind_text(st, 2, self.iso.string(from: to), -1, Self.transient)
+        }
+    }
+
+    /// Deletes rows older than `date` and returns their clip paths so the files
+    /// can be removed too.
+    ///
+    /// Uses a single `DELETE ... RETURNING` statement rather than a `SELECT`
+    /// followed by a `DELETE`: with two statements, the `WHERE` predicate is
+    /// re-evaluated at DELETE time, so a row inserted between the SELECT and
+    /// the DELETE would be deleted without its path ever being returned to
+    /// the caller — permanently orphaning that row's clip file on disk.
+    /// `RETURNING` (SQLite 3.35+) deletes and reports the affected rows
+    /// atomically within one statement, so no row can vanish unreported.
+    public func deleteEvents(olderThan date: Date) throws -> [String] {
+        let st = try prepare("DELETE FROM events WHERE started_at < ? RETURNING clip_path;")
+        defer { sqlite3_finalize(st) }
+        sqlite3_bind_text(st, 1, iso.string(from: date), -1, Self.transient)
+        var paths: [String] = []
+        loop: while true {
+            switch sqlite3_step(st) {
+            case SQLITE_ROW:
+                paths.append(String(cString: sqlite3_column_text(st, 0)))
+            case SQLITE_DONE:
+                break loop
+            default:
+                throw sqlError()
+            }
+        }
+        return paths
+    }
+
+    // MARK: Gaps
+
+    public func openGap(startedAt: Date, reason: GapReason) throws -> Int64 {
+        let st = try prepare("INSERT INTO gaps (started_at, reason) VALUES (?,?);")
+        defer { sqlite3_finalize(st) }
+        sqlite3_bind_text(st, 1, iso.string(from: startedAt), -1, Self.transient)
+        sqlite3_bind_text(st, 2, reason.rawValue, -1, Self.transient)
+        guard sqlite3_step(st) == SQLITE_DONE else { throw sqlError() }
+        return sqlite3_last_insert_rowid(db)
+    }
+
+    public func closeGap(id: Int64, endedAt: Date) throws {
+        let st = try prepare("UPDATE gaps SET ended_at = ? WHERE id = ?;")
+        defer { sqlite3_finalize(st) }
+        sqlite3_bind_text(st, 1, iso.string(from: endedAt), -1, Self.transient)
+        sqlite3_bind_int64(st, 2, id)
+        guard sqlite3_step(st) == SQLITE_DONE else { throw sqlError() }
+    }
+
+    public func openGaps() throws -> [GapRecord] {
+        try readGaps("SELECT id,started_at,ended_at,reason FROM gaps WHERE ended_at IS NULL ORDER BY started_at ASC;")
+    }
+
+    public func allGaps() throws -> [GapRecord] {
+        try readGaps("SELECT id,started_at,ended_at,reason FROM gaps ORDER BY started_at ASC;")
+    }
+
+    // MARK: Spans
+
+    /// Opens a monitoring span. `ended_at` is set equal to `started_at` at open
+    /// (never NULL) and rolled forward by `updateSpanEnd` — so a crash leaves the
+    /// span finalized in place at its last heartbeat, never open and never "now".
+    public func openSpan(startedAt: Date) throws -> Int64 {
+        let st = try prepare("INSERT INTO monitoring_spans (started_at, ended_at) VALUES (?,?);")
+        defer { sqlite3_finalize(st) }
+        let ts = iso.string(from: startedAt)
+        sqlite3_bind_text(st, 1, ts, -1, Self.transient)
+        sqlite3_bind_text(st, 2, ts, -1, Self.transient)
+        guard sqlite3_step(st) == SQLITE_DONE else { throw sqlError() }
+        return sqlite3_last_insert_rowid(db)
+    }
+
+    /// Rolls (heartbeat) or finalizes (stop) a span's `ended_at`.
+    public func updateSpanEnd(id: Int64, endedAt: Date) throws {
+        let st = try prepare("UPDATE monitoring_spans SET ended_at = ? WHERE id = ?;")
+        defer { sqlite3_finalize(st) }
+        sqlite3_bind_text(st, 1, iso.string(from: endedAt), -1, Self.transient)
+        sqlite3_bind_int64(st, 2, id)
+        guard sqlite3_step(st) == SQLITE_DONE else { throw sqlError() }
+    }
+
+    /// Spans overlapping `[from, to]`: started before `to` AND ended after `from`.
+    /// Table-absence-tolerant: a database predating this feature (opened read-only,
+    /// where CREATE TABLE is not permitted) has no monitoring_spans table, and this
+    /// returns [] rather than throwing.
+    public func spans(from: Date, to: Date) throws -> [SpanRecord] {
+        guard tableExists("monitoring_spans") else { return [] }
+        let st = try prepare("""
+        SELECT id, started_at, ended_at FROM monitoring_spans
+        WHERE started_at <= ? AND ended_at >= ?
+        ORDER BY started_at ASC;
+        """)
+        defer { sqlite3_finalize(st) }
+        sqlite3_bind_text(st, 1, iso.string(from: to), -1, Self.transient)
+        sqlite3_bind_text(st, 2, iso.string(from: from), -1, Self.transient)
+        var out: [SpanRecord] = []
+        while sqlite3_step(st) == SQLITE_ROW {
+            out.append(SpanRecord(
+                id: sqlite3_column_int64(st, 0),
+                startedAt: iso.date(from: String(cString: sqlite3_column_text(st, 1))) ?? .distantPast,
+                endedAt: iso.date(from: String(cString: sqlite3_column_text(st, 2))) ?? .distantFuture))
+        }
+        return out
+    }
+
+    private func tableExists(_ name: String) -> Bool {
+        guard let st = try? prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?;")
+        else { return false }
+        defer { sqlite3_finalize(st) }
+        sqlite3_bind_text(st, 1, name, -1, Self.transient)
+        return sqlite3_step(st) == SQLITE_ROW
+    }
+
+    // MARK: Review aggregates
+
+    /// Events grouped by calendar day, ascending. The calendar day is extracted
+    /// via `substr(started_at, 1, 10)`, which reads the first 10 characters
+    /// (`yyyy-MM-dd`) of the stored local-time ISO string, representing the day
+    /// in this store's timezone (the offset baked into `started_at` by whichever
+    /// timezone the writer used). A quiet day has no row at all, rather than
+    /// a row with `count == 0` — callers filling a chart must treat absence
+    /// as zero themselves.
+    public func eventCountsByDay(from: Date, to: Date) throws -> [DailyCount] {
+        let sql = """
+        SELECT substr(started_at, 1, 10) AS day, COUNT(*) AS n
+        FROM events WHERE started_at >= ? AND started_at <= ?
+        GROUP BY day ORDER BY day ASC;
+        """
+        let st = try prepare(sql)
+        defer { sqlite3_finalize(st) }
+        sqlite3_bind_text(st, 1, iso.string(from: from), -1, Self.transient)
+        sqlite3_bind_text(st, 2, iso.string(from: to), -1, Self.transient)
+        var out: [DailyCount] = []
+        while sqlite3_step(st) == SQLITE_ROW {
+            out.append(DailyCount(day: String(cString: sqlite3_column_text(st, 0)),
+                                  count: Int(sqlite3_column_int(st, 1))))
+        }
+        return out
+    }
+
+    public func eventCount(from: Date, to: Date) throws -> Int {
+        let st = try prepare("SELECT COUNT(*) FROM events WHERE started_at >= ? AND started_at <= ?;")
+        defer { sqlite3_finalize(st) }
+        sqlite3_bind_text(st, 1, iso.string(from: from), -1, Self.transient)
+        sqlite3_bind_text(st, 2, iso.string(from: to), -1, Self.transient)
+        return sqlite3_step(st) == SQLITE_ROW ? Int(sqlite3_column_int(st, 0)) : 0
+    }
+
+    /// Gaps overlapping `[from, to]`: started before `to` AND (still open OR
+    /// ended after `from`).
+    public func gaps(from: Date, to: Date) throws -> [GapRecord] {
+        return try readGaps("""
+        SELECT id, started_at, ended_at, reason FROM gaps
+        WHERE started_at <= ? AND (ended_at IS NULL OR ended_at >= ?)
+        ORDER BY started_at ASC;
+        """) { st in
+            sqlite3_bind_text(st, 1, self.iso.string(from: to), -1, Self.transient)
+            sqlite3_bind_text(st, 2, self.iso.string(from: from), -1, Self.transient)
+        }
+    }
+
+    /// Monitored seconds over `[from, to]` = time inside a monitoring span, minus
+    /// in-span gap time. Spans are the positive record of "the recorder was
+    /// running"; gaps are interruptions within a run. A range with no span reports
+    /// zero monitored seconds — the calendar/PDF no longer infer coverage from the
+    /// mere absence of gap rows. Each span/gap is clamped to the range; a span
+    /// contributes only its real [started_at, ended_at] seconds and is never
+    /// extended to `to`, so coverage never overstates.
+    public func coverageTotals(from: Date, to: Date) throws -> CoverageTotals {
+        var spanSeconds = 0.0
+        for s in try spans(from: from, to: to) {
+            let start = max(s.startedAt, from)
+            let end = min(s.endedAt, to)
+            spanSeconds += max(end.timeIntervalSince(start), 0)
+        }
+        let overlappingGaps = try gaps(from: from, to: to)
+        var gapSeconds = 0.0
+        for g in overlappingGaps {
+            let start = max(g.startedAt, from)
+            let end = min(g.endedAt ?? to, to)
+            gapSeconds += max(end.timeIntervalSince(start), 0)
+        }
+        return CoverageTotals(monitoredSeconds: max(spanSeconds - gapSeconds, 0),
+                              gapSeconds: gapSeconds, gapCount: overlappingGaps.count)
+    }
+
+    // MARK: Private
+
+    private func exec(_ sql: String) throws {
+        var err: UnsafeMutablePointer<CChar>?
+        if sqlite3_exec(db, sql, nil, nil, &err) != SQLITE_OK {
+            let msg = err.map { String(cString: $0) } ?? "unknown"
+            sqlite3_free(err)
+            throw EventStoreError.sqlFailed(msg)
+        }
+    }
+
+    private func prepare(_ sql: String) throws -> OpaquePointer? {
+        var st: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &st, nil) == SQLITE_OK else { throw sqlError() }
+        return st
+    }
+
+    private func sqlError() -> EventStoreError {
+        .sqlFailed(db.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown")
+    }
+
+    private func readEvents(_ sql: String,
+                            bind: ((OpaquePointer?) -> Void)? = nil) throws -> [EventRecord] {
+        let st = try prepare(sql)
+        defer { sqlite3_finalize(st) }
+        bind?(st)
+        var out: [EventRecord] = []
+        while sqlite3_step(st) == SQLITE_ROW {
+            out.append(EventRecord(
+                id: sqlite3_column_int64(st, 0),
+                startedAt: iso.date(from: String(cString: sqlite3_column_text(st, 1))) ?? .distantPast,
+                durationSec: sqlite3_column_double(st, 2),
+                peakDBFS: sqlite3_column_double(st, 3),
+                meanDBFS: sqlite3_column_double(st, 4),
+                bandLowHz: sqlite3_column_double(st, 5),
+                bandHighHz: sqlite3_column_double(st, 6),
+                thresholdDBFS: sqlite3_column_double(st, 7),
+                deviceUID: String(cString: sqlite3_column_text(st, 8)),
+                clipPath: String(cString: sqlite3_column_text(st, 9))))
+        }
+        return out
+    }
+
+    private func readGaps(_ sql: String,
+                          bind: ((OpaquePointer?) -> Void)? = nil) throws -> [GapRecord] {
+        let st = try prepare(sql)
+        defer { sqlite3_finalize(st) }
+        bind?(st)
+        var out: [GapRecord] = []
+        while sqlite3_step(st) == SQLITE_ROW {
+            let endedText = sqlite3_column_text(st, 2)
+            out.append(GapRecord(
+                id: sqlite3_column_int64(st, 0),
+                startedAt: iso.date(from: String(cString: sqlite3_column_text(st, 1))) ?? .distantPast,
+                endedAt: endedText.map { iso.date(from: String(cString: $0)) } ?? nil,
+                reason: GapReason(rawValue: String(cString: sqlite3_column_text(st, 3))) ?? .unknown))
+        }
+        return out
+    }
+}

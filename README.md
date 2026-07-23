@@ -1,0 +1,74 @@
+# Bandwatch
+
+A native macOS app that watches a microphone for noise in a frequency band you
+choose, records timestamped evidence of it, and exports a report you can hand to
+a landlord, council, or mediator.
+
+![Bandwatch main window — live spectrum and band levels](screenshots/main-window.png)
+
+## What it does
+
+- **Live frequency analysis** — a real-time spectrum and a band-level meter, with
+  Fast/Slow time weighting.
+- **Drag to set the band and threshold** — target exactly the frequencies you
+  care about (e.g. a subwoofer's 20–120 Hz).
+- **Event detection** — automatically logs each time the band crosses your
+  threshold, with peak/mean level, duration, and timestamp.
+- **Recording** — saves a short band-filtered clip per event, with pre-roll.
+- **Proven coverage** — records exactly when monitoring was running, so the
+  report can prove "we were listening", not merely assume it.
+- **Review** — a calendar heatmap, a 24-hour event ribbon, an event list, and
+  clip playback.
+- **Evidence export** — a paginated PDF report, CSVs, and the in-range clips,
+  zipped into one bundle.
+
+![Review window](screenshots/review-window.png)
+
+![Evidence PDF report](screenshots/evidence-pdf.png)
+
+## How it reads the numbers (honesty notes)
+
+- Levels are **dBFS, not calibrated SPL** — a relative digital scale, not a
+  decibel reading you could cite as an absolute loudness.
+- Recorded audio is **band-filtered** — only frequencies inside the chosen band
+  are kept. For a **low bass band** (e.g. a subwoofer's 20–120 Hz) this strips out
+  the speech range, so those clips contain no intelligible speech. **A band that
+  overlaps voice frequencies (roughly 300 Hz–3.4 kHz — including the 1–4 kHz and
+  2–8 kHz presets) can capture clear, understandable speech**, so treat bundles
+  from higher bands as potentially containing conversation before sharing them.
+- Coverage is a **measured record** of when the recorder was running, not an
+  inference.
+
+## Choosing a microphone
+
+> **The MacBook's built-in microphone is not reliable for band-filtered
+> monitoring.** Its aggressive noise suppression and voice-tuned processing
+> distort low-frequency content, so a real subwoofer rumble can read faint or
+> inconsistent. **Use a discrete microphone** — a USB mic, a lavalier, or an
+> audio interface — for trustworthy measurements. Pick it from the **Input**
+> menu on the main window.
+
+## Build & run
+
+Requires **macOS 15+** and a Swift 6.3+ toolchain. No external dependencies.
+
+```bash
+swift build
+swift run Bandwatch
+```
+
+(This repository uses a swiftly-managed toolchain; if `swift` on your PATH is
+older, activate your toolchain first.)
+
+## Deploying to another Mac
+
+See [DEPLOY.md](DEPLOY.md) for building a signed, universal `.app` and installing
+it on a dedicated monitoring machine.
+
+## License
+
+MIT — see [LICENSE](LICENSE). © 2026 Chris Connar.
+
+## Dedication
+
+*Dedicated to and necessitated by the unreasonable inhabitants of 206.*

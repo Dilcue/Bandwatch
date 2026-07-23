@@ -1,0 +1,7 @@
+.DS_Store
+.build/
+*.xcodeproj
+build/
+.superpowers/
+dist/
+docs/superpowers/
