@@ -118,6 +118,13 @@ public final class EventStore {
             throw EventStoreError.couldNotOpen(msg)
         }
         try exec("PRAGMA journal_mode=WAL;")
+        // A Stop→Start cycle (including the fast churn of a device
+        // disconnect/reconnect) briefly overlaps the previous coordinator's
+        // still-open write connection with the new one's. WAL permits only one
+        // writer at a time, so without a busy timeout that overlap surfaces as
+        // an immediate "database is locked" error instead of a short wait for
+        // the other writer's transaction to commit. Wait rather than fail.
+        try exec("PRAGMA busy_timeout=5000;")
         try createEventsAndGapsSchema()
         try exec("""
         CREATE TABLE IF NOT EXISTS monitoring_spans (
@@ -143,6 +150,13 @@ public final class EventStore {
             throw EventStoreError.couldNotOpen(msg)
         }
         try exec("PRAGMA journal_mode=WAL;")
+        // A Stop→Start cycle (including the fast churn of a device
+        // disconnect/reconnect) briefly overlaps the previous coordinator's
+        // still-open write connection with the new one's. WAL permits only one
+        // writer at a time, so without a busy timeout that overlap surfaces as
+        // an immediate "database is locked" error instead of a short wait for
+        // the other writer's transaction to commit. Wait rather than fail.
+        try exec("PRAGMA busy_timeout=5000;")
         try createEventsAndGapsSchema()
     }
 

@@ -1,6 +1,5 @@
 import Foundation
 import Observation
-import CoreAudio
 
 extension UserDefaults {
     /// Explicit preferences domain for Bandwatch settings, so they persist the
@@ -535,9 +534,8 @@ public final class MonitoringSession {
     private func resumeAfterReconnect() {
         closeDeviceDisconnectGap()
         captureConnection = .connected
-        let targetDeviceID = selectedInputDeviceUID.flatMap { CoreAudioInputDevices.deviceID(forUID: $0) }
         do {
-            try startCapture(targetDeviceID: targetDeviceID)
+            try startCapture(targetDeviceUID: selectedInputDeviceUID)
         } catch {
             // The device returned but the engine would not restart on it. Halt like a
             // genuine capture failure -- stop() tears down the still-live coordinator
@@ -659,15 +657,17 @@ public final class MonitoringSession {
 
     // MARK: Lifecycle
 
-    /// Brings up the capture engine on `targetDeviceID` (nil = system default)
+    /// Brings up the capture engine on `targetDeviceUID` (nil = system default)
     /// and starts the analysis loop. Shared by `start()` (fresh session) and
-    /// `resumeAfterReconnect()` (same device returning). Throws the same
-    /// `CaptureError`s `AudioCaptureEngine.start()` does. Does NOT touch
-    /// permission, the coordinator, or session-state resets — those belong to
-    /// the caller.
-    private func startCapture(targetDeviceID: AudioDeviceID?) throws {
+    /// `resumeAfterReconnect()` (same device returning). Passes the device
+    /// *UID*, not a resolved `AudioDeviceID`: the engine re-resolves it on every
+    /// (re)start, which is what keeps a reconnect working after the ID has gone
+    /// stale. Throws the same `CaptureError`s `AudioCaptureEngine.start()` does.
+    /// Does NOT touch permission, the coordinator, or session-state resets —
+    /// those belong to the caller.
+    private func startCapture(targetDeviceUID: String?) throws {
         let engine = AudioCaptureEngine(ringBuffer: ringBuffer, sampleRate: sampleRate,
-                                        targetDeviceID: targetDeviceID)
+                                        targetDeviceUID: targetDeviceUID)
         try engine.start()
         capture = engine
         isRunning = true
@@ -753,9 +753,8 @@ public final class MonitoringSession {
         recordedSampleCountForTesting = 0
 
         // Resolve the selected UID to a live device ID (nil → system default).
-        let targetDeviceID = selectedInputDeviceUID.flatMap { CoreAudioInputDevices.deviceID(forUID: $0) }
         do {
-            try startCapture(targetDeviceID: targetDeviceID)
+            try startCapture(targetDeviceUID: selectedInputDeviceUID)
         } catch let error as CaptureError {
             lastError = error
             return
