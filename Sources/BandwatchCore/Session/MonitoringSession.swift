@@ -666,6 +666,27 @@ public final class MonitoringSession {
     /// Does NOT touch permission, the coordinator, or session-state resets —
     /// those belong to the caller.
     private func startCapture(targetDeviceUID: String?) throws {
+        // Start capture from a clean analysis state. For `start()` this repeats
+        // its own reset block (harmless — the values are idempotent). For
+        // `resumeAfterReconnect()` it is ESSENTIAL: without it the resumed
+        // analysis loop inherits a `stallStartTime` set in the moments between
+        // the physical unplug and `pauseForDisconnect` (when the tap had already
+        // gone silent), so its very first post-resume tick computes "stalled for
+        // several seconds" against that stale timestamp and trips the 3s stall
+        // detector almost immediately — the reconnect never gets a chance to
+        // recover. Clearing the ring/filter buffers also stops the first
+        // post-resume window from being spliced across the monitoring gap.
+        ringBuffer.clear()
+        lastObservedTotalWritten = 0
+        stallStartTime = nil
+        levelSmoother.reset()
+        filter.reset()
+        filteredBuffer.clear()
+        lastConsumedTotal = nil
+        noSignalStartTime = nil
+        inputHealth = .healthy
+        lastPublishTime = nil
+
         let engine = AudioCaptureEngine(ringBuffer: ringBuffer, sampleRate: sampleRate,
                                         targetDeviceUID: targetDeviceUID)
         try engine.start()
