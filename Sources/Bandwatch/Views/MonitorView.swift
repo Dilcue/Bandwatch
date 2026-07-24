@@ -61,11 +61,21 @@ private struct StatusSection: View {
             if showingNoSignal {
                 noSignalBanner
             }
+
+            if let name = awaitingReconnectName {
+                deviceDisconnectBanner(name)
+            }
         }
     }
 
     private var showingNoSignal: Bool {
         session.isRunning && session.inputHealth == .noSignal
+    }
+
+    private var awaitingReconnectName: String? {
+        guard session.isRunning else { return nil }
+        if case let .awaitingReconnect(name) = session.captureConnection { return name }
+        return nil
     }
 
     private var header: some View {
@@ -89,11 +99,13 @@ private struct StatusSection: View {
 
     private var headerDotColor: Color {
         guard session.isRunning else { return Palette.mutedInk(scheme) }
+        if awaitingReconnectName != nil { return Palette.warning(scheme) }
         return showingNoSignal ? Palette.warning(scheme) : Color.green
     }
 
     private var headerText: String {
         guard session.isRunning else { return "Stopped" }
+        if awaitingReconnectName != nil { return "Monitoring — input disconnected" }
         return showingNoSignal ? "Monitoring — no input signal" : "Monitoring"
     }
 
@@ -103,6 +115,16 @@ private struct StatusSection: View {
         // opposite the scheme -- the reverse of the always-white error banner,
         // whose red background stays dark in both modes.
         Text("No input signal for an extended period. This usually means the microphone, interface, or mixer is off, muted, or disconnected. Monitoring is continuing and will recover automatically if the signal returns.")
+            .font(.callout)
+            .foregroundStyle(scheme == .dark ? .black : .white)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Palette.warning(scheme).opacity(0.85))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func deviceDisconnectBanner(_ name: String) -> some View {
+        Text("Input “\(name)” was disconnected. Monitoring is paused and this interval is logged as a coverage gap. It will resume automatically when “\(name)” is reconnected.")
             .font(.callout)
             .foregroundStyle(scheme == .dark ? .black : .white)
             .padding(10)
