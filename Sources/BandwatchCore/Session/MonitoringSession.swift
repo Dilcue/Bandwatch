@@ -441,6 +441,10 @@ public final class MonitoringSession {
     @ObservationIgnored private var persistedInputUID: String?
     @ObservationIgnored private var isResolvingInput = false
     static let inputDeviceDefaultsKey = "bandwatch.selectedInputDeviceUID"
+    static let thresholdDefaultsKey = "bandwatch.triggerDBFS"
+    /// The detector trigger threshold used until the user sets their own (which
+    /// then becomes the remembered default — see `setTriggerThreshold`).
+    public static let defaultTriggerDBFS: Double = -35
 
     // (see `UserDefaults.bandwatch` at file scope for why settings use an
     // explicit domain rather than `.standard`.)
@@ -620,7 +624,10 @@ public final class MonitoringSession {
         self.band = initialBand
         self.filter = BandFilter(band: initialBand, sampleRate: sampleRate)
 
-        let config = DetectorConfig(triggerDBFS: -40)
+        // Start from the user's remembered threshold if they've set one,
+        // otherwise the default. Persisted via `setTriggerThreshold`.
+        let savedThreshold = defaults.object(forKey: Self.thresholdDefaultsKey) as? Double
+        let config = DetectorConfig(triggerDBFS: savedThreshold ?? Self.defaultTriggerDBFS)
         self.detectorConfig = config
         self.detector = EventDetector(config: config)
 
@@ -1037,9 +1044,18 @@ public final class MonitoringSession {
         await c.shutdown()
     }
 
+    /// Sets the detector trigger threshold from a user action and remembers it
+    /// as the future default (persisted like the input-device selection).
+    /// Setting `detectorConfig` directly — as internal code and tests do — is
+    /// deliberately NOT persisted; only a genuine user threshold change is.
+    public func setTriggerThreshold(_ dbfs: Double) {
+        detectorConfig.triggerDBFS = dbfs
+        defaults.set(dbfs, forKey: Self.thresholdDefaultsKey)
+    }
+
     public func applySuggestedThreshold() {
         guard let suggested = suggestedThresholdDBFS else { return }
-        detectorConfig.triggerDBFS = suggested
+        setTriggerThreshold(suggested)
     }
 
     // MARK: Analysis

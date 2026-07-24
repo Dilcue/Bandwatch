@@ -149,7 +149,9 @@ private func archiveHasAnyFile(atRoot root: URL) -> Bool {
 
 @MainActor
 @Test func testSuggestedThresholdAppearsAfterEnoughQuietSamples() {
-    let s = MonitoringSession()
+    // Throwaway defaults suite: applySuggestedThreshold persists the value, and
+    // this must not write to the shared app prefs domain during tests.
+    let s = MonitoringSession(defaults: UserDefaults(suiteName: "bw-test-\(UUID().uuidString)")!)
     let quiet = sine(freq: 50, amplitude: 0.001, count: 8192, sampleRate: 44100)
     for i in 0..<BaselineEstimator.minimumSamples {
         s.ingestForTesting(samples: quiet, at: Double(i) * 0.05)
@@ -1218,4 +1220,24 @@ private func archiveHasAnyFile(atRoot root: URL) -> Bool {
     store.close()
     #expect(spans.count == 1)
     #expect(spans[0].endedAt >= spans[0].startedAt)
+}
+
+@MainActor
+@Test func testTriggerThresholdDefaultsToMinus35AndPersistsUserChanges() {
+    let defaults = UserDefaults(suiteName: "bw-test-\(UUID().uuidString)")!
+    // Fresh install: the default trigger threshold is -35 dBFS.
+    let s1 = MonitoringSession(defaults: defaults)
+    #expect(MonitoringSession.defaultTriggerDBFS == -35)
+    #expect(s1.detectorConfig.triggerDBFS == -35)
+
+    // A user threshold change is remembered as the future default...
+    s1.setTriggerThreshold(-28)
+    #expect(s1.detectorConfig.triggerDBFS == -28)
+    let s2 = MonitoringSession(defaults: defaults)
+    #expect(s2.detectorConfig.triggerDBFS == -28)
+
+    // ...but setting detectorConfig directly (internal/tests) does NOT persist.
+    s2.detectorConfig = DetectorConfig(triggerDBFS: -50)
+    let s3 = MonitoringSession(defaults: defaults)
+    #expect(s3.detectorConfig.triggerDBFS == -28)
 }

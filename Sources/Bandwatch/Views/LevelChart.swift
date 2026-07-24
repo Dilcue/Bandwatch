@@ -36,7 +36,7 @@ struct LevelChart: View {
 
     private var thresholdDBFS: Double {
         get { session.detectorConfig.triggerDBFS }
-        nonmutating set { session.detectorConfig.triggerDBFS = newValue }
+        nonmutating set { session.setTriggerThreshold(newValue) }
     }
 
     /// The threshold to render: the in-progress drag value while dragging,
