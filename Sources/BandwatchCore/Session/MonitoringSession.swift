@@ -497,6 +497,12 @@ public final class MonitoringSession {
         switch action {
         case .refreshOnly:
             availableInputDevices = fresh
+            // Re-resolve the pinned selection when stopped, so a pinned device that
+            // reconnects while monitoring is stopped gets re-selected (otherwise Start
+            // would silently fall back to System Default / the built-in mic). NOT while
+            // running/awaiting: resolveInputSelection() would clear selectedInputDeviceUID
+            // during awaitingReconnect and break resumeAfterReconnect's UID lookup.
+            if !isRunning { resolveInputSelection() }
         case .pause(let name):
             availableInputDevices = fresh
             pauseForDisconnect(deviceName: name)

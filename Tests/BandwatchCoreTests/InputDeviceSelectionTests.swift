@@ -133,6 +133,28 @@ private final class MutableEnumerator: InputDeviceEnumerating, @unchecked Sendab
     #expect(s.availableInputDevices == [board, mic])
 }
 
+/// Evidence-integrity regression: the pinned device is absent at launch (transient
+/// fallback to System Default), then reconnects while the session is NOT running,
+/// without the picker ever being opened (so `refreshInputDevices()` never fires).
+/// The live Core Audio observer's `.refreshOnly` path must itself re-resolve the
+/// selection when stopped -- otherwise `selectedInputDeviceUID` stays nil even
+/// though the dropdown now lists the pinned device, and a subsequent Start would
+/// silently capture System Default (the built-in mic) instead of the trusted,
+/// pinned input.
+@MainActor @Test func testPinnedDeviceReconnectingWhileStoppedIsReselected() {
+    let defaults = freshDefaults()
+    defaults.set("mic-uid", forKey: MonitoringSession.inputDeviceDefaultsKey)
+    let enumr = MutableEnumerator(devices: [board], defaultUID: "board-uid")   // mic absent at launch
+    let s = MonitoringSession(deviceEnumerator: enumr, defaults: defaults)
+    #expect(s.selectedInputDeviceUID == nil)                 // transient fallback
+    #expect(s.inputNotice != nil)
+
+    enumr.simulateChange(newDevices: [board, mic])           // mic reconnects while STOPPED
+
+    #expect(s.selectedInputDeviceUID == "mic-uid")           // live observer recovered the pinned choice
+    #expect(s.inputNotice == nil)
+}
+
 private func tempRoot() -> URL {
     let d = FileManager.default.temporaryDirectory
         .appendingPathComponent("bw-\(UUID().uuidString)")
