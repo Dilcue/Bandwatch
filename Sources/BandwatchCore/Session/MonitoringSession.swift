@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import CoreAudio
 
 extension UserDefaults {
     /// Explicit preferences domain for Bandwatch settings, so they persist the
@@ -625,6 +626,22 @@ public final class MonitoringSession {
 
     // MARK: Lifecycle
 
+    /// Brings up the capture engine on `targetDeviceID` (nil = system default)
+    /// and starts the analysis loop. Shared by `start()` (fresh session) and
+    /// `resumeAfterReconnect()` (same device returning). Throws the same
+    /// `CaptureError`s `AudioCaptureEngine.start()` does. Does NOT touch
+    /// permission, the coordinator, or session-state resets — those belong to
+    /// the caller.
+    private func startCapture(targetDeviceID: AudioDeviceID?) throws {
+        let engine = AudioCaptureEngine(ringBuffer: ringBuffer, sampleRate: sampleRate,
+                                        targetDeviceID: targetDeviceID)
+        try engine.start()
+        capture = engine
+        isRunning = true
+        analysisGeneration += 1
+        startAnalysisLoop(generation: analysisGeneration)
+    }
+
     public func start() async {
         guard !isRunning else { return }
         lastError = nil
@@ -704,10 +721,8 @@ public final class MonitoringSession {
 
         // Resolve the selected UID to a live device ID (nil → system default).
         let targetDeviceID = selectedInputDeviceUID.flatMap { CoreAudioInputDevices.deviceID(forUID: $0) }
-        let engine = AudioCaptureEngine(ringBuffer: ringBuffer, sampleRate: sampleRate,
-                                        targetDeviceID: targetDeviceID)
         do {
-            try engine.start()
+            try startCapture(targetDeviceID: targetDeviceID)
         } catch let error as CaptureError {
             lastError = error
             return
@@ -715,11 +730,6 @@ public final class MonitoringSession {
             lastError = .engineStartFailed(error.localizedDescription)
             return
         }
-
-        capture = engine
-        isRunning = true
-        analysisGeneration += 1
-        startAnalysisLoop(generation: analysisGeneration)
 
         if isRecordingEnabled {
             // `recordingRoot` defaults to nil, meaning `defaultRoot()` — the
