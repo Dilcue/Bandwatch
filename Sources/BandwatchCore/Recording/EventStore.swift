@@ -314,6 +314,34 @@ public final class EventStore {
         try readGaps("SELECT id,started_at,ended_at,reason FROM gaps ORDER BY started_at ASC;")
     }
 
+    /// Resolves coverage gaps left OPEN by a crash in a PRIOR run — rows with a
+    /// `started_at` before `cutoff` and no `ended_at`. Each is closed at the
+    /// latest monitoring-span heartbeat at or after its start (the last instant
+    /// the app is known to have been alive), or at its own `started_at` when no
+    /// such span exists. Returns how many were resolved. Keeps each gap's
+    /// original `reason` — the record of WHY coverage lapsed is preserved; only
+    /// its missing end is filled in.
+    ///
+    /// `cutoff` MUST be this process's launch time. That is what prevents this
+    /// from touching a gap the CURRENTLY-running app opened and will close
+    /// itself — an in-progress device-disconnect gap, or one being finalized by
+    /// a Stop→Start teardown racing a new coordinator's creation. Only rows that
+    /// predate this launch can be orphans from a previous run.
+    @discardableResult
+    public func resolveStaleOpenGaps(before cutoff: Date) throws -> Int {
+        let lastAlive = tableExists("monitoring_spans")
+            ? "(SELECT MAX(ended_at) FROM monitoring_spans WHERE ended_at >= gaps.started_at)"
+            : "NULL"
+        let st = try prepare("""
+        UPDATE gaps SET ended_at = COALESCE(\(lastAlive), gaps.started_at)
+        WHERE ended_at IS NULL AND started_at < ?;
+        """)
+        defer { sqlite3_finalize(st) }
+        sqlite3_bind_text(st, 1, iso.string(from: cutoff), -1, Self.transient)
+        guard sqlite3_step(st) == SQLITE_DONE else { throw sqlError() }
+        return Int(sqlite3_changes(db))
+    }
+
     // MARK: Spans
 
     /// Opens a monitoring span. `ended_at` is set equal to `started_at` at open

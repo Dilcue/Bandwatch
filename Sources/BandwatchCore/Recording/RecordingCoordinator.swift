@@ -156,13 +156,21 @@ public actor RecordingCoordinator {
     public init(paths: RecordingPaths,
                 sampleRate: Double,
                 policy: RetentionPolicy = RetentionPolicy(),
-                segmentDuration: TimeInterval = SegmentWriter.defaultSegmentDuration) throws {
+                segmentDuration: TimeInterval = SegmentWriter.defaultSegmentDuration,
+                resolveGapsOpenedBefore: Date = .distantPast) throws {
         self.paths = paths
         self.sampleRate = sampleRate
         self.segments = SegmentWriter(paths: paths, sampleRate: sampleRate,
                                       segmentDuration: segmentDuration)
         self.storage = StorageManager(paths: paths, policy: policy)
         self.store = try EventStore(url: paths.databaseURL)
+        // Close any gaps a PRIOR run left open (a crash orphans them with no end
+        // time), at the last instant that run was known alive, so the coverage
+        // record is complete instead of nagging with an unresolvable banner.
+        // Bounded to gaps predating this process's launch so it can never touch
+        // a gap the current session is managing. Default `.distantPast` resolves
+        // nothing (backward-compatible for callers that don't pass a cutoff).
+        _ = try? self.store.resolveStaleOpenGaps(before: resolveGapsOpenedBefore)
         self.staleOpenGaps = (try? self.store.openGaps().count) ?? 0
     }
 

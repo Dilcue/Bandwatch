@@ -242,3 +242,41 @@ private func insertOne(_ s: EventStore, at date: Date, peak: Double = -18.5,
     #expect(all[0].reason != .shutdown)
     s.close()
 }
+
+@Test func testResolveStaleOpenGapsClosesPriorRunGapsAtLastHeartbeat() throws {
+    let s = try makeStore()
+    let base = Date(timeIntervalSince1970: 1_700_000_000)
+    // A prior run: a span heartbeated to base+120, and a gap opened at base+60
+    // that was never closed (crash).
+    let spanID = try s.openSpan(startedAt: base)
+    try s.updateSpanEnd(id: spanID, endedAt: base.addingTimeInterval(120))
+    let stale = try s.openGap(startedAt: base.addingTimeInterval(60), reason: .deviceLost)
+    // A gap the CURRENT run opened (after the launch cutoff) must be left alone.
+    let current = try s.openGap(startedAt: base.addingTimeInterval(600), reason: .deviceLost)
+
+    let cutoff = base.addingTimeInterval(300)   // "this process launched at base+300"
+    let resolved = try s.resolveStaleOpenGaps(before: cutoff)
+
+    #expect(resolved == 1)
+    #expect(try s.openGaps().map { $0.id } == [current])   // only the current-run gap stays open
+    let closed = try s.allGaps().first { $0.id == stale }!
+    #expect(closed.reason == .deviceLost)                  // original reason preserved
+    #expect(closed.endedAt != nil)
+    // Closed at the last heartbeat (base+120), not "now" and not its own start.
+    #expect(abs(closed.endedAt!.timeIntervalSince(base.addingTimeInterval(120))) < 1)
+}
+
+@Test func testResolveStaleOpenGapsFallsBackToStartWhenNoLaterSpan() throws {
+    let s = try makeStore()
+    let base = Date(timeIntervalSince1970: 1_700_000_000)
+    // Gap opened after every span heartbeat -> no span at/after its start.
+    let spanID = try s.openSpan(startedAt: base)
+    try s.updateSpanEnd(id: spanID, endedAt: base.addingTimeInterval(10))
+    let stale = try s.openGap(startedAt: base.addingTimeInterval(50), reason: .captureStalled)
+
+    let resolved = try s.resolveStaleOpenGaps(before: base.addingTimeInterval(300))
+    #expect(resolved == 1)
+    let closed = try s.allGaps().first { $0.id == stale }!
+    // No later heartbeat -> closed at its own start (zero-duration, never negative).
+    #expect(abs(closed.endedAt!.timeIntervalSince(base.addingTimeInterval(50))) < 1)
+}

@@ -245,6 +245,11 @@ public final class MonitoringSession {
     private let levelSmoother: LevelSmoother
     private var capture: AudioCaptureEngine?
 
+    /// This process's launch time (this object is created once, at app launch).
+    /// Passed to the `RecordingCoordinator` so it only auto-resolves coverage
+    /// gaps a PRIOR run left open — never one the current session is managing.
+    @ObservationIgnored private let launchTime = Date()
+
     // MARK: Recording
     //
     // `filteredBuffer` holds band-filtered audio only — this is the ONLY
@@ -792,7 +797,8 @@ public final class MonitoringSession {
             // to the user's real evidence database.
             let root = recordingRoot ?? RecordingPaths.defaultRoot()
             let paths = RecordingPaths(root: root)
-            if let c = try? RecordingCoordinator(paths: paths, sampleRate: sampleRate) {
+            if let c = try? RecordingCoordinator(paths: paths, sampleRate: sampleRate,
+                                                 resolveGapsOpenedBefore: launchTime) {
                 coordinator = c
                 let uid = recordingDeviceUID()   // the device that actually captures
                 Task { await c.start(deviceUID: uid) }
