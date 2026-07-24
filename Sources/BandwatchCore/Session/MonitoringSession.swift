@@ -532,12 +532,15 @@ public final class MonitoringSession {
         let targetDeviceID = selectedInputDeviceUID.flatMap { CoreAudioInputDevices.deviceID(forUID: $0) }
         do {
             try startCapture(targetDeviceID: targetDeviceID)
-        } catch let error as CaptureError {
-            lastError = error
-            isRunning = false
         } catch {
-            lastError = .engineStartFailed(error.localizedDescription)
-            isRunning = false
+            // The device returned but the engine would not restart on it. Halt like a
+            // genuine capture failure -- stop() tears down the still-live coordinator
+            // (open segment, SQLite handle, polling task) that pause left running,
+            // instead of orphaning it (see failCaptureStalled's note on this bug class).
+            // isRunning is still true here (startCapture throws before setting it), so
+            // stop()'s `guard isRunning` passes and the full teardown runs.
+            stop()
+            lastError = (error as? CaptureError) ?? .engineStartFailed(error.localizedDescription)
         }
     }
 
