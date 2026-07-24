@@ -81,11 +81,19 @@ private let board = AudioInputDevice(uid: "board-uid", name: "USB Audio CODEC")
 private final class MutableEnumerator: InputDeviceEnumerating, @unchecked Sendable {
     var devices: [AudioInputDevice]
     var defaultUID: String?
+    private var onChange: (@Sendable () -> Void)?
     init(devices: [AudioInputDevice], defaultUID: String?) {
         self.devices = devices; self.defaultUID = defaultUID
     }
     func available() -> [AudioInputDevice] { devices }
     func systemDefaultUID() -> String? { defaultUID }
+    func startObserving(onChange: @escaping @Sendable () -> Void) { self.onChange = onChange }
+    func stopObserving() { onChange = nil }
+    /// Swap the device list and fire the observer, as a hot-plug would.
+    func simulateChange(newDevices: [AudioInputDevice]) {
+        devices = newDevices
+        onChange?()
+    }
 }
 
 @MainActor @Test func testRefreshInputDevicesRereadsList() {
@@ -115,4 +123,12 @@ private final class MutableEnumerator: InputDeviceEnumerating, @unchecked Sendab
     #expect(s.inputNotice == nil)
     // The preference was never lost from persistence during the transient fallback.
     #expect(defaults.string(forKey: MonitoringSession.inputDeviceDefaultsKey) == "mic-uid")
+}
+
+@MainActor @Test func testHardwareChangeLiveRefreshesDropdown() {
+    let enumr = MutableEnumerator(devices: [board], defaultUID: "board-uid")
+    let s = MonitoringSession(deviceEnumerator: enumr, defaults: freshDefaults())
+    #expect(s.availableInputDevices == [board])
+    enumr.simulateChange(newDevices: [board, mic])   // mic plugged in, no manual refresh
+    #expect(s.availableInputDevices == [board, mic])
 }

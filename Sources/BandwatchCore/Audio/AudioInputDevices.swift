@@ -24,12 +24,56 @@ public protocol InputDeviceEnumerating: Sendable {
     func available() -> [AudioInputDevice]
     /// UID of the operating system's current default input device, if any.
     func systemDefaultUID() -> String?
+    /// Begin observing hardware topology changes. `onChange` is invoked
+    /// whenever the set of input devices may have changed. Delivery thread is
+    /// implementation-defined; consumers must hop to their own isolation.
+    func startObserving(onChange: @escaping @Sendable () -> Void)
+    func stopObserving()
+}
+
+public extension InputDeviceEnumerating {
+    // Default no-ops: a static/fake enumerator that never changes need not
+    // implement observation. Only CoreAudioInputDevices (real hardware) and
+    // test fakes that exercise change events override these.
+    func startObserving(onChange: @escaping @Sendable () -> Void) {}
+    func stopObserving() {}
 }
 
 /// Core Audio (HAL) implementation of input-device discovery. Approach verified
 /// by spike 2026-07-23 (see the M6 design spec).
-public struct CoreAudioInputDevices: InputDeviceEnumerating {
+///
+/// `@unchecked Sendable`: `listenerBlock`/`listenerAddress` below are mutable,
+/// which the compiler can't statically prove safe for a `Sendable`-conforming
+/// class. In practice they're never touched concurrently -- each
+/// `MonitoringSession` owns exactly one instance and calls `startObserving`
+/// once (from its `init`) and `stopObserving` once (from its `deinit`), with
+/// no other access in between. Same reasoning/pattern as the `MutableEnumerator`
+/// test fake.
+public final class CoreAudioInputDevices: InputDeviceEnumerating, @unchecked Sendable {
     public init() {}
+
+    private var listenerBlock: AudioObjectPropertyListenerBlock?
+    private var listenerAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+
+    public func startObserving(onChange: @escaping @Sendable () -> Void) {
+        stopObserving()
+        let block: AudioObjectPropertyListenerBlock = { _, _ in onChange() }
+        listenerBlock = block
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &listenerAddress, DispatchQueue.main, block)
+    }
+
+    public func stopObserving() {
+        guard let block = listenerBlock else { return }
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &listenerAddress, DispatchQueue.main, block)
+        listenerBlock = nil
+    }
+
+    deinit { stopObserving() }
 
     public func available() -> [AudioInputDevice] {
         Self.allDeviceIDs().compactMap { id in

@@ -439,6 +439,13 @@ public final class MonitoringSession {
         resolveInputSelection()
     }
 
+    /// Reacts to a Core Audio hardware-topology change. For now: refresh the
+    /// device list so the picker stays current. Task 2/3 extend this to
+    /// pause/resume on a pinned device disconnecting/returning.
+    func handleDeviceChange() {
+        availableInputDevices = deviceEnumerator.available()
+    }
+
     /// Sets the effective selection from the remembered preference and the
     /// current device list, WITHOUT persisting (guarded by `isResolvingInput` so
     /// the didSet doesn't treat it as a user change and clobber the preference).
@@ -519,7 +526,16 @@ public final class MonitoringSession {
         self.persistedInputUID = defaults.string(forKey: Self.inputDeviceDefaultsKey)
         self.availableInputDevices = deviceEnumerator.available()
         resolveInputSelection()
+
+        // Live-refresh the picker (and, once running, detect a pinned device
+        // disconnecting) on any hardware topology change. Delivered on the main
+        // queue by CoreAudioInputDevices, so assumeIsolated is valid here.
+        deviceEnumerator.startObserving { [weak self] in
+            MainActor.assumeIsolated { self?.handleDeviceChange() }
+        }
     }
+
+    deinit { deviceEnumerator.stopObserving() }
 
     // MARK: Lifecycle
 
