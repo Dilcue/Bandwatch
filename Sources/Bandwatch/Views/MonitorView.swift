@@ -19,24 +19,32 @@ struct MonitorView: View {
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            StatusSection(session: session)
-            RecordingRow(status: session.recordingStatus)
+        // A ScrollView, not a plain VStack: when a status banner appears the
+        // content can exceed a short window, and without scrolling the overflow
+        // was clipping the header up under the title bar. With it, the window
+        // stays fully usable and simply scrolls if it can't fit everything.
+        // Content is top-aligned naturally (no Spacer needed), matching the old
+        // layout when the window is tall enough to show everything.
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                StatusSection(session: session)
+                RecordingRow(status: session.recordingStatus)
 
-            // Configuration surfaced above the charts so it's immediately
-            // apparent what's being monitored and how.
-            PreferencesSection(session: session)
+                // Configuration surfaced above the charts so it's immediately
+                // apparent what's being monitored and how.
+                PreferencesSection(session: session)
 
-            SpectrumChart(session: session, sampleRate: 44100, fftSize: 8192)
-                .frame(height: 180)
+                SpectrumChart(session: session, sampleRate: 44100, fftSize: 8192)
+                    .frame(height: 180)
 
-            LevelChart(session: session)
-                .frame(height: 140)
+                LevelChart(session: session)
+                    .frame(height: 140)
 
-            ReadoutSection(session: session)
-            Spacer()
+                ReadoutSection(session: session)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(16)
         .frame(minWidth: 640, minHeight: 560)
         .background(Palette.surface(scheme))
     }
@@ -115,6 +123,7 @@ private struct StatusSection: View {
         // whose red background stays dark in both modes.
         Text("No input signal for an extended period. This usually means the microphone, interface, or mixer is off, muted, or disconnected. Monitoring is continuing and will recover automatically if the signal returns.")
             .font(.callout)
+            .fixedSize(horizontal: false, vertical: true)
             .foregroundStyle(scheme == .dark ? .black : .white)
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -125,6 +134,7 @@ private struct StatusSection: View {
     private func deviceDisconnectBanner(_ name: String) -> some View {
         Text("Input “\(name)” was disconnected. Monitoring is paused and this interval is logged as a coverage gap. It will resume automatically when “\(name)” is reconnected.")
             .font(.callout)
+            .fixedSize(horizontal: false, vertical: true)
             .foregroundStyle(scheme == .dark ? .black : .white)
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -146,6 +156,7 @@ private struct StatusSection: View {
         }
         return Text(message)
             .font(.callout)
+            .fixedSize(horizontal: false, vertical: true)
             .foregroundStyle(.white)
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
