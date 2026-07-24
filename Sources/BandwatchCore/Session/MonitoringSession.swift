@@ -25,6 +25,14 @@ public enum InputHealth: Equatable, Sendable {
     case noSignal
 }
 
+/// Whether capture is currently connected to its pinned device, or paused
+/// waiting for that device to return. Distinct from `lastError` (which halts):
+/// this is a recoverable, ongoing condition — the session stays `isRunning`.
+public enum CaptureConnection: Equatable, Sendable {
+    case connected
+    case awaitingReconnect(deviceName: String)
+}
+
 /// Orchestrates capture, analysis, and detection, publishing observable state
 /// for the UI. Owns no DSP logic of its own.
 @MainActor
@@ -71,6 +79,7 @@ public final class MonitoringSession {
     /// capture failure. Never feed it into `lastError`, which would make the
     /// error banner lie about capture having failed.
     public private(set) var inputHealth: InputHealth = .healthy
+    public private(set) var captureConnection: CaptureConnection = .connected
 
     public static let preRollSeconds: TimeInterval = 10
 
@@ -250,6 +259,7 @@ public final class MonitoringSession {
     @ObservationIgnored private var coordinator: RecordingCoordinator?
     @ObservationIgnored private var captureStalledGapOpen = false
     @ObservationIgnored private var noSignalGapOpen = false
+    @ObservationIgnored private var deviceDisconnectGapOpen = false
 
     /// `ringBuffer.totalWritten` as of the last time the recording path
     /// consumed audio, `nil` until the first window of a session.
@@ -439,12 +449,88 @@ public final class MonitoringSession {
         resolveInputSelection()
     }
 
-    /// Reacts to a Core Audio hardware-topology change. For now: refresh the
-    /// device list so the picker stays current. Task 2/3 extend this to
-    /// pause/resume on a pinned device disconnecting/returning.
-    func handleDeviceChange() {
-        availableInputDevices = deviceEnumerator.available()
+    enum DeviceChangeAction: Equatable {
+        case refreshOnly
+        case pause(deviceName: String)
+        case resume
     }
+
+    /// Pure decision from current state + the freshly-read device list.
+    /// `devices` is the just-enumerated list -- the caller assigns it to
+    /// `availableInputDevices` in every branch immediately afterward, but
+    /// passes it here first so this decision (and, on the `.pause` path,
+    /// `pinnedDeviceName`'s lookup of the departing device's name in the
+    /// still-stale `availableInputDevices`) sees the two lists distinctly.
+    /// Pinned-only: a nil `persistedInputUID` (System Default) never pauses.
+    func deviceChangeAction(devices: [AudioInputDevice]) -> DeviceChangeAction {
+        guard isRunning, let pinned = persistedInputUID else { return .refreshOnly }
+        let present = devices.contains { $0.uid == pinned }
+        switch captureConnection {
+        case .connected:
+            return present ? .refreshOnly : .pause(deviceName: pinnedDeviceName(pinned))
+        case .awaitingReconnect:
+            return present ? .resume : .refreshOnly
+        }
+    }
+
+    /// Best-known display name for the pinned UID: the last-seen name from the
+    /// current list, falling back to the UID itself if it is already gone.
+    private func pinnedDeviceName(_ uid: String) -> String {
+        availableInputDevices.first { $0.uid == uid }?.name ?? uid
+    }
+
+    /// Reacts to a Core Audio hardware-topology change. Refreshes the device
+    /// list so the picker stays current, and -- for a session that is running
+    /// with a pinned (non-System-Default) input -- pauses capture when that
+    /// device disconnects, and (Task 3) resumes it when the device returns.
+    func handleDeviceChange() {
+        // Read the fresh list FIRST so the pause/resume decision reflects
+        // whether the pinned device is present RIGHT NOW -- deviceChangeAction
+        // takes it as an explicit parameter for exactly this reason. Crucially,
+        // this is done before `availableInputDevices` itself is reassigned
+        // below, so pinnedDeviceName (called from inside deviceChangeAction,
+        // on the .pause path) still reads the PRE-refresh list and can find
+        // the departing device's name one last time.
+        let fresh = deviceEnumerator.available()
+        let action = deviceChangeAction(devices: fresh)
+        switch action {
+        case .refreshOnly:
+            availableInputDevices = fresh
+        case .pause(let name):
+            availableInputDevices = fresh
+            pauseForDisconnect(deviceName: name)
+        case .resume:
+            availableInputDevices = fresh
+            resumeAfterReconnect()          // defined in Task 3
+        }
+    }
+
+    /// Pinned device vanished mid-session: tear down capture (so AUHAL's silent
+    /// fallback to the built-in mic can never reach the detector/recorder),
+    /// open a coverage gap, and enter the paused/awaiting state. The session
+    /// stays `isRunning`; the coordinator stays alive.
+    private func pauseForDisconnect(deviceName: String) {
+        analysisTask?.cancel()
+        analysisTask = nil
+        capture?.stop()
+        capture = nil
+        latestFrame = nil
+        captureConnection = .awaitingReconnect(deviceName: deviceName)
+        if !deviceDisconnectGapOpen, let c = coordinator {
+            deviceDisconnectGapOpen = true
+            let wall = Date()
+            Task { await c.openGap(reason: .deviceLost, at: wall) }
+        }
+    }
+
+    /// Placeholder for Task 3: resuming capture once the pinned device
+    /// reappears (restart capture on it, close the `.deviceLost` gap, and
+    /// return `captureConnection` to `.connected`). `deviceChangeAction`
+    /// already computes the `.resume` decision so `handleDeviceChange` can
+    /// route to it, but no session in Task 2's tests ever reaches
+    /// `.awaitingReconnect` and then sees its device return, so this is
+    /// intentionally unimplemented here.
+    private func resumeAfterReconnect() {}
 
     /// Sets the effective selection from the remembered preference and the
     /// current device list, WITHOUT persisting (guarded by `isResolvingInput` so
@@ -597,6 +683,11 @@ public final class MonitoringSession {
         filter.reset()
         captureStalledGapOpen = false
         noSignalGapOpen = false
+        // A fresh Start must not inherit a stale device-lost gap flag either --
+        // otherwise a pinned device that disconnected in a PREVIOUS run would
+        // silently suppress the gap the NEXT run's disconnect should open.
+        deviceDisconnectGapOpen = false
+        captureConnection = .connected
         // A fresh Start must not carry over a previous run's drop count --
         // otherwise a clean run would inherit and forever display a stale
         // number from before Stop. See the property's doc comment (I3).
@@ -1039,6 +1130,9 @@ public final class MonitoringSession {
         filter.reset()
         captureStalledGapOpen = false
         noSignalGapOpen = false
+        // Mirrors start()'s own reset -- see that call site's comment.
+        deviceDisconnectGapOpen = false
+        captureConnection = .connected
         droppedArchiveWindowCount = 0
         lastConsumedTotal = nil
         recordedSampleCountForTesting = 0

@@ -132,3 +132,59 @@ private final class MutableEnumerator: InputDeviceEnumerating, @unchecked Sendab
     enumr.simulateChange(newDevices: [board, mic])   // mic plugged in, no manual refresh
     #expect(s.availableInputDevices == [board, mic])
 }
+
+private func tempRoot() -> URL {
+    let d = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bw-\(UUID().uuidString)")
+    try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+    return d
+}
+
+@MainActor @Test func testPinnedDisconnectPausesAndWarns() async {
+    let defaults = freshDefaults()
+    defaults.set("mic-uid", forKey: MonitoringSession.inputDeviceDefaultsKey)
+    let enumr = MutableEnumerator(devices: [board, mic], defaultUID: "board-uid")
+    let s = MonitoringSession(deviceEnumerator: enumr, defaults: defaults)
+    #expect(s.selectedInputDeviceUID == "mic-uid")
+    await s.startRecordingForTesting(root: tempRoot())
+
+    enumr.simulateChange(newDevices: [board])            // the pinned mic is unplugged
+
+    #expect(s.captureConnection == .awaitingReconnect(deviceName: "USB Lavalier"))
+    #expect(s.isRunning)                                 // paused, NOT stopped
+    #expect(s.latestFrame == nil)                        // no frozen spectrum reads as live
+    s.stop()
+}
+
+@MainActor @Test func testSystemDefaultDisconnectDoesNotPause() async {
+    let enumr = MutableEnumerator(devices: [board], defaultUID: "board-uid")
+    let s = MonitoringSession(deviceEnumerator: enumr, defaults: freshDefaults())
+    #expect(s.selectedInputDeviceUID == nil)             // System Default
+    await s.startRecordingForTesting(root: tempRoot())
+
+    enumr.simulateChange(newDevices: [])                 // default device vanishes
+
+    #expect(s.captureConnection == .connected)           // follows the OS; no pause
+    #expect(s.isRunning)
+    s.stop()
+}
+
+@MainActor @Test func testPinnedDisconnectPersistsDeviceLostGap() async throws {
+    let defaults = freshDefaults()
+    defaults.set("mic-uid", forKey: MonitoringSession.inputDeviceDefaultsKey)
+    let enumr = MutableEnumerator(devices: [board, mic], defaultUID: "board-uid")
+    let s = MonitoringSession(deviceEnumerator: enumr, defaults: defaults)
+    let root = tempRoot()
+    await s.startRecordingForTesting(root: root)
+
+    enumr.simulateChange(newDevices: [board])            // disconnect → opens gap
+    // Let the detached openGap Task reach the actor.
+    try await Task.sleep(for: .milliseconds(50))
+    s.stop()
+    try await Task.sleep(for: .milliseconds(50))         // let stop()'s teardown finish
+
+    let store = try EventStore(readOnlyURL:
+        RecordingPaths(root: root).databaseURL)
+    let gaps = try store.allGaps()
+    #expect(gaps.contains { $0.reason == .deviceLost })
+}
