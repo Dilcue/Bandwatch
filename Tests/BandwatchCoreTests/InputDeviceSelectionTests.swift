@@ -188,3 +188,44 @@ private func tempRoot() -> URL {
     let gaps = try store.allGaps()
     #expect(gaps.contains { $0.reason == .deviceLost })
 }
+
+@MainActor @Test func testReconnectResumesAndClosesGap() async throws {
+    let defaults = freshDefaults()
+    defaults.set("mic-uid", forKey: MonitoringSession.inputDeviceDefaultsKey)
+    let enumr = MutableEnumerator(devices: [board, mic], defaultUID: "board-uid")
+    let s = MonitoringSession(deviceEnumerator: enumr, defaults: defaults)
+    let root = tempRoot()
+    await s.startRecordingForTesting(root: root)
+
+    enumr.simulateChange(newDevices: [board])            // disconnect
+    #expect(s.captureConnection == .awaitingReconnect(deviceName: "USB Lavalier"))
+    try await Task.sleep(for: .milliseconds(50))         // let openGap land
+
+    enumr.devices = [board, mic]                         // device physically back
+    s.resumeForTesting()                                 // logical resume (no real engine)
+    #expect(s.captureConnection == .connected)
+    try await Task.sleep(for: .milliseconds(50))         // let closeGap land
+
+    s.stop()
+    try await Task.sleep(for: .milliseconds(50))
+    let store = try EventStore(readOnlyURL: RecordingPaths(root: root).databaseURL)
+    let deviceLost = try store.allGaps().filter { $0.reason == .deviceLost }
+    #expect(deviceLost.count == 1)
+    #expect(deviceLost[0].endedAt != nil)                // closed by resume, not left open
+}
+
+@MainActor @Test func testResumeDecisionIgnoresDifferentDevice() async {
+    let defaults = freshDefaults()
+    defaults.set("mic-uid", forKey: MonitoringSession.inputDeviceDefaultsKey)
+    let enumr = MutableEnumerator(devices: [board, mic], defaultUID: "board-uid")
+    let s = MonitoringSession(deviceEnumerator: enumr, defaults: defaults)
+    await s.startRecordingForTesting(root: tempRoot())
+
+    enumr.simulateChange(newDevices: [board])            // pinned mic gone → awaiting
+    #expect(s.captureConnection == .awaitingReconnect(deviceName: "USB Lavalier"))
+
+    let other = AudioInputDevice(uid: "other-uid", name: "Some Other Mic")
+    // A DIFFERENT device appears; the pinned mic is still absent.
+    #expect(s.deviceChangeAction(devices: [board, other]) == .refreshOnly)
+    s.stop()
+}

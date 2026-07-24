@@ -483,7 +483,7 @@ public final class MonitoringSession {
     /// Reacts to a Core Audio hardware-topology change. Refreshes the device
     /// list so the picker stays current, and -- for a session that is running
     /// with a pinned (non-System-Default) input -- pauses capture when that
-    /// device disconnects, and (Task 3) resumes it when the device returns.
+    /// device disconnects, and resumes it when the device returns.
     func handleDeviceChange() {
         // Read the fresh list FIRST so the pause/resume decision reflects
         // whether the pinned device is present RIGHT NOW -- deviceChangeAction
@@ -502,7 +502,7 @@ public final class MonitoringSession {
             pauseForDisconnect(deviceName: name)
         case .resume:
             availableInputDevices = fresh
-            resumeAfterReconnect()          // defined in Task 3
+            resumeAfterReconnect()
         }
     }
 
@@ -524,14 +524,38 @@ public final class MonitoringSession {
         }
     }
 
-    /// Placeholder for Task 3: resuming capture once the pinned device
-    /// reappears (restart capture on it, close the `.deviceLost` gap, and
-    /// return `captureConnection` to `.connected`). `deviceChangeAction`
-    /// already computes the `.resume` decision so `handleDeviceChange` can
-    /// route to it, but no session in Task 2's tests ever reaches
-    /// `.awaitingReconnect` and then sees its device return, so this is
-    /// intentionally unimplemented here.
-    private func resumeAfterReconnect() {}
+    /// Same pinned device returned: close the gap and restart capture on it.
+    /// The coordinator stayed alive, so no permission prompt or new session.
+    private func resumeAfterReconnect() {
+        closeDeviceDisconnectGap()
+        captureConnection = .connected
+        let targetDeviceID = selectedInputDeviceUID.flatMap { CoreAudioInputDevices.deviceID(forUID: $0) }
+        do {
+            try startCapture(targetDeviceID: targetDeviceID)
+        } catch let error as CaptureError {
+            lastError = error
+            isRunning = false
+        } catch {
+            lastError = .engineStartFailed(error.localizedDescription)
+            isRunning = false
+        }
+    }
+
+    private func closeDeviceDisconnectGap() {
+        guard deviceDisconnectGapOpen, let c = coordinator else { return }
+        deviceDisconnectGapOpen = false
+        let wall = Date()
+        Task { await c.closeGap(reason: .deviceLost, at: wall) }
+    }
+
+    /// Test seam: the resume analog of `startRecordingForTesting`. Performs the
+    /// logical half of resume (close the gap, return to `.connected`) WITHOUT
+    /// bringing up a real `AVAudioEngine`, which needs a microphone unavailable
+    /// in CI. The real engine restart is covered manually (Task 5).
+    func resumeForTesting() {
+        closeDeviceDisconnectGap()
+        captureConnection = .connected
+    }
 
     /// Sets the effective selection from the remembered preference and the
     /// current device list, WITHOUT persisting (guarded by `isResolvingInput` so
