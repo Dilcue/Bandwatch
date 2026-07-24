@@ -42,10 +42,11 @@ struct MonitorView: View {
     }
 }
 
-/// Header dot/text plus the error and no-signal banners. All of these depend
-/// only on `isRunning`, `inputHealth`, and `lastError` -- state transitions
-/// that change rarely -- never on the per-frame spectrum/level data, so this
-/// section's re-renders are cheap and infrequent.
+/// Header dot/text plus the error, no-signal, and device-disconnect banners.
+/// All of these depend only on `isRunning`, `inputHealth`, `lastError`, and
+/// `captureConnection` -- state transitions that change rarely -- never on
+/// the per-frame spectrum/level data, so this section's re-renders are cheap
+/// and infrequent.
 private struct StatusSection: View {
     let session: MonitoringSession
     @Environment(\.colorScheme) private var scheme
@@ -58,12 +59,10 @@ private struct StatusSection: View {
                 errorBanner(error)
             }
 
-            if showingNoSignal {
-                noSignalBanner
-            }
-
             if let name = awaitingReconnectName {
                 deviceDisconnectBanner(name)
+            } else if showingNoSignal {
+                noSignalBanner
             }
         }
     }
