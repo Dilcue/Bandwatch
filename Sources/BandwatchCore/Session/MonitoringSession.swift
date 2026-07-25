@@ -1578,3 +1578,12 @@ public final class MonitoringSession {
         }
     }
 }
+
+extension MonitoringSession: SchedulableSession {
+    public var isMonitoring: Bool { isRunning }
+    public var isScheduleOwned: Bool { startedBySchedule }
+    // `start` is async; the scheduler's edge logic is synchronous, so spawn a
+    // Task. Ordering is fine — the scheduler only starts when nothing is running.
+    public func startScheduled() { Task { await start(bySchedule: true) } }
+    public func stopScheduled() { stop() }
+}
