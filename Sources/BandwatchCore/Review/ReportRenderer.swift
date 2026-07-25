@@ -96,6 +96,27 @@ public enum ReportRenderer {
         return f.string(from: date)
     }
 
+    /// The coverage range as inclusive whole days — the From/To pickers are
+    /// date-only, so the range reads as dates, not the arbitrary wall-clock time
+    /// it was generated at. `end` is an EXCLUSIVE upper bound (start of the day
+    /// after the last covered day), so the inclusive final day is the one
+    /// containing `end` minus an instant. Collapses to a single date when the
+    /// range covers one day. The zone abbreviation is stated once, here.
+    static func formattedDateRange(_ start: Date, _ end: Date, timeZone: TimeZone) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = timeZone
+        f.dateFormat = "MMM d, yyyy"
+        let zf = DateFormatter()
+        zf.locale = Locale(identifier: "en_US_POSIX")
+        zf.timeZone = timeZone
+        zf.dateFormat = "zzz"
+        let startDay = f.string(from: start)
+        let endDay = f.string(from: end.addingTimeInterval(-1))   // exclusive end -> last inclusive day
+        let zone = zf.string(from: start)
+        return startDay == endDay ? "\(startDay) (\(zone))" : "\(startDay) – \(endDay) (\(zone))"
+    }
+
     /// Adaptive-unit duration for the coverage-gap summary, e.g. "4 s",
     /// "4.2 min", "1.5 h" — a short gap should read as seconds, not round
     /// away to "0.0 h" and look like it never happened.
@@ -186,7 +207,7 @@ public enum ReportRenderer {
         newPage()
         // Header
         text("Bandwatch — Noise Evidence Report", size: 20, bold: true)
-        text("Range: \(formattedHeader(data.rangeStart, timeZone: timeZone))  to  \(formattedHeader(data.rangeEnd, timeZone: timeZone))", size: 10)
+        text("Range: \(formattedDateRange(data.rangeStart, data.rangeEnd, timeZone: timeZone))", size: 10)
         let bandLine: String
         if !data.hasBandInfo {
             bandLine = "Band: —    Threshold: —"

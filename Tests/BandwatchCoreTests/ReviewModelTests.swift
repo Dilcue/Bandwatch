@@ -225,3 +225,33 @@ private func seed(_ url: URL) throws {
     #expect(data?.hasBandInfo == true)
     #expect(data?.bandThresholdVaries == true)
 }
+
+@MainActor @Test func testDefaultRangeIsDayAlignedToDataExtent() throws {
+    let url = tempDBURL()
+    let s = try EventStore(url: url)
+    let cal = Calendar.current
+    let earliest = iso("2026-07-10T15:30:00-05:00")
+    let latest = iso("2026-07-14T02:15:00-05:00")
+    _ = try s.insertEvent(startedAt: earliest, durationSec: 5, peakDBFS: -20, meanDBFS: -28,
+                          band: .bassSubwoofer, thresholdDBFS: -40, deviceUID: "D", clipPath: "/a.flac")
+    _ = try s.insertEvent(startedAt: latest, durationSec: 5, peakDBFS: -20, meanDBFS: -28,
+                          band: .bassSubwoofer, thresholdDBFS: -40, deviceUID: "D", clipPath: "/b.flac")
+    s.close()
+
+    // Default range: whole days spanning the data, not a 30-day-ending-now window.
+    let m = ReviewModel(databaseURL: url)
+    #expect(m.rangeStart == cal.startOfDay(for: earliest))
+    #expect(m.rangeEnd == cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: latest))!)
+    m.load()
+    #expect(m.events.count == 2)
+}
+
+@MainActor @Test func testDefaultRangeFallsBackToTodayWhenEmpty() throws {
+    let url = tempDBURL()
+    let s = try EventStore(url: url); s.close()   // schema only, no rows
+    let cal = Calendar.current
+    let m = ReviewModel(databaseURL: url)
+    let today = cal.startOfDay(for: Date())
+    #expect(m.rangeStart == today)
+    #expect(m.rangeEnd == cal.date(byAdding: .day, value: 1, to: today)!)
+}

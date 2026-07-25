@@ -191,3 +191,18 @@ private func iso(_ s: String) -> Date {
     let doc = try #require(CGPDFDocument(url as CFURL))
     #expect(doc.numberOfPages >= 1)
 }
+
+@MainActor @Test func testFormattedDateRangeIsInclusiveWholeDays() {
+    let tz = TimeZone(identifier: "America/Chicago")!
+    func d(_ s: String) -> Date {
+        let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime]; return f.date(from: s)!
+    }
+    // rangeEnd is exclusive (start of the day after the last covered day).
+    let multi = ReportRenderer.formattedDateRange(d("2026-07-10T00:00:00-05:00"),
+                                                  d("2026-07-15T00:00:00-05:00"), timeZone: tz)
+    #expect(multi == "Jul 10, 2026 – Jul 14, 2026 (CDT)")
+    // A single covered day collapses to one date.
+    let single = ReportRenderer.formattedDateRange(d("2026-07-24T00:00:00-05:00"),
+                                                   d("2026-07-25T00:00:00-05:00"), timeZone: tz)
+    #expect(single == "Jul 24, 2026 (CDT)")
+}

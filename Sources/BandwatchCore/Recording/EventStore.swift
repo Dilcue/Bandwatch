@@ -342,6 +342,32 @@ public final class EventStore {
         return Int(sqlite3_changes(db))
     }
 
+    /// The earliest and latest timestamps of any recorded activity — events,
+    /// gaps, or monitoring spans — or nil when the database holds none. Used to
+    /// default the Review/report range to the period the data actually spans
+    /// rather than an arbitrary window. Tolerant of a database predating the
+    /// spans feature (opened read-only, no `monitoring_spans` table).
+    public func dataExtent() throws -> (earliest: Date, latest: Date)? {
+        var sources = [
+            "SELECT started_at AS t FROM events",
+            "SELECT started_at FROM gaps",
+            "SELECT COALESCE(ended_at, started_at) FROM gaps",
+        ]
+        if tableExists("monitoring_spans") {
+            sources.append("SELECT started_at FROM monitoring_spans")
+            sources.append("SELECT ended_at FROM monitoring_spans")
+        }
+        let st = try prepare("SELECT MIN(t), MAX(t) FROM (\(sources.joined(separator: " UNION ALL ")));")
+        defer { sqlite3_finalize(st) }
+        guard sqlite3_step(st) == SQLITE_ROW,
+              sqlite3_column_type(st, 0) != SQLITE_NULL,
+              sqlite3_column_type(st, 1) != SQLITE_NULL,
+              let earliest = iso.date(from: String(cString: sqlite3_column_text(st, 0))),
+              let latest = iso.date(from: String(cString: sqlite3_column_text(st, 1)))
+        else { return nil }
+        return (earliest, latest)
+    }
+
     // MARK: Spans
 
     /// Opens a monitoring span. `ended_at` is set equal to `started_at` at open

@@ -30,9 +30,26 @@ public final class ReviewModel {
 
     public init(databaseURL: URL) {
         self.databaseURL = databaseURL
-        // default to the last 30 days
-        self.rangeEnd = Date()
-        self.rangeStart = Date().addingTimeInterval(-30 * 86400)
+        // Default range: the whole days the recorded data actually spans, so an
+        // evidence report describes the period it covers rather than an arbitrary
+        // 30-day window ending at the generation instant. `rangeEnd` is the start
+        // of the day AFTER the last activity (exclusive end of that day), matching
+        // the date-only From/To pickers. Falls back to today when the database is
+        // empty or absent (e.g. a fresh install before any recording).
+        let cal = Calendar.current
+        var extent: (earliest: Date, latest: Date)?
+        if let store = try? EventStore(readOnlyURL: databaseURL) {
+            extent = try? store.dataExtent()
+            store.close()
+        }
+        if let extent {
+            self.rangeStart = cal.startOfDay(for: extent.earliest)
+            self.rangeEnd = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: extent.latest))!
+        } else {
+            let today = cal.startOfDay(for: Date())
+            self.rangeStart = today
+            self.rangeEnd = cal.date(byAdding: .day, value: 1, to: today)!
+        }
         self.isReady = true
     }
 

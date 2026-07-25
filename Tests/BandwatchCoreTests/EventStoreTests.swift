@@ -280,3 +280,18 @@ private func insertOne(_ s: EventStore, at date: Date, peak: Double = -18.5,
     // No later heartbeat -> closed at its own start (zero-duration, never negative).
     #expect(abs(closed.endedAt!.timeIntervalSince(base.addingTimeInterval(50))) < 1)
 }
+
+@Test func testDataExtentIsNilWhenEmptyAndSpansAllTablesOtherwise() throws {
+    let s = try makeStore()
+    #expect(try s.dataExtent() == nil)   // empty database
+
+    let base = Date(timeIntervalSince1970: 1_700_000_000)
+    let sp = try s.openSpan(startedAt: base)
+    try s.updateSpanEnd(id: sp, endedAt: base.addingTimeInterval(3600))          // span: base .. base+1h
+    _ = try s.openGap(startedAt: base.addingTimeInterval(86400), reason: .deviceLost)  // open gap +1 day
+
+    let ext = try s.dataExtent()
+    #expect(ext != nil)
+    #expect(abs(ext!.earliest.timeIntervalSince(base)) < 1)                              // earliest = span start
+    #expect(abs(ext!.latest.timeIntervalSince(base.addingTimeInterval(86400))) < 1)      // latest = open gap start (COALESCE)
+}
