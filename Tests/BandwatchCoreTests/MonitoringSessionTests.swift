@@ -1241,3 +1241,33 @@ private func archiveHasAnyFile(atRoot root: URL) -> Bool {
     let s3 = MonitoringSession(defaults: defaults)
     #expect(s3.detectorConfig.triggerDBFS == -28)
 }
+
+// MARK: - Task 2: session ownership (`startedBySchedule`)
+//
+// The scheduler (a later task) must stop only sessions IT started, never a
+// manually-started one. `startedBySchedule` is how a session records who
+// started it: set on a successful `start(bySchedule:)`/
+// `startRecordingForTesting(root:bySchedule:)`, cleared on every teardown.
+// Driven through the no-mic `startRecordingForTesting` seam, like the C1/C2/I3
+// tests above, since a real `start()` needs a granted mic.
+
+@MainActor
+@Test func testStartedByScheduleFlagTracksOwnership() async {
+    let s = MonitoringSession(defaults: UserDefaults(suiteName: "bw-\(UUID().uuidString)")!)
+    #expect(s.startedBySchedule == false)
+    await s.startRecordingForTesting(root: tempRoot(), bySchedule: true)
+    #expect(s.isRunning)
+    #expect(s.startedBySchedule == true)         // scheduler-owned
+    s.stop()
+    #expect(s.startedBySchedule == false)        // cleared on stop
+    await s.startRecordingForTesting(root: tempRoot(), bySchedule: false)
+    #expect(s.startedBySchedule == false)        // manual-owned
+    s.stop()
+}
+
+private func tempRoot() -> URL {
+    let d = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bw-\(UUID().uuidString)")
+    try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+    return d
+}

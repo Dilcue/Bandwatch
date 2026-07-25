@@ -73,6 +73,12 @@ public final class MonitoringSession {
     public private(set) var recentEvents: [DetectedEvent] = []
     public private(set) var suggestedThresholdDBFS: Double?
     public private(set) var isRunning = false
+    /// True while a session the SCHEDULER started is running. The scheduler stops
+    /// only sessions it owns (this true), never a manually-started one. Set by
+    /// whoever starts the session (see `start(bySchedule:)`), cleared on every
+    /// teardown. NOT reset by `resumeAfterReconnect` — ownership survives a
+    /// device reconnect within the same session.
+    public private(set) var startedBySchedule = false
     public private(set) var lastError: CaptureError?
     /// Distinct from `lastError`: this is a recoverable, ongoing condition --
     /// samples are still flowing and monitoring is NOT halted -- not a
@@ -708,7 +714,7 @@ public final class MonitoringSession {
         startAnalysisLoop(generation: analysisGeneration)
     }
 
-    public func start() async {
+    public func start(bySchedule: Bool = false) async {
         guard !isRunning else { return }
         lastError = nil
 
@@ -795,6 +801,12 @@ public final class MonitoringSession {
             lastError = .engineStartFailed(error.localizedDescription)
             return
         }
+
+        // Capture is up (isRunning == true) -- record who started this run.
+        // Set here, not inside startCapture(): that method is also called by
+        // resumeAfterReconnect(), and ownership must SURVIVE a reconnect, not
+        // be reset by one.
+        startedBySchedule = bySchedule
 
         if isRecordingEnabled {
             // `recordingRoot` defaults to nil, meaning `defaultRoot()` — the
@@ -953,6 +965,7 @@ public final class MonitoringSession {
         capture?.stop()
         capture = nil
         isRunning = false
+        startedBySchedule = false
 
         var pendingEventWrite: PendingEventWrite?
         if let event = detector.finish(at: now) {
@@ -1208,7 +1221,7 @@ public final class MonitoringSession {
     /// portion of `start()`, nothing about how audio is analyzed or
     /// recorded once running. `analysisTask` is deliberately left nil (no
     /// live timer loop): callers drive frames in directly.
-    func startRecordingForTesting(root: URL) async {
+    func startRecordingForTesting(root: URL, bySchedule: Bool = false) async {
         guard !isRunning else { return }
         ringBuffer.clear()
         lastObservedTotalWritten = 0
@@ -1230,6 +1243,7 @@ public final class MonitoringSession {
         recordedSampleCountForTesting = 0
 
         isRunning = true
+        startedBySchedule = bySchedule
         analysisGeneration += 1
         isRecordingEnabled = true
         recordingRoot = root
@@ -1237,6 +1251,7 @@ public final class MonitoringSession {
         let paths = RecordingPaths(root: root)
         guard let c = try? RecordingCoordinator(paths: paths, sampleRate: sampleRate) else {
             isRunning = false
+            startedBySchedule = false
             return
         }
         coordinator = c
