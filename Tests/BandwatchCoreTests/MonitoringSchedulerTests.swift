@@ -18,7 +18,7 @@ private func freshDefaults() -> UserDefaults { UserDefaults(suiteName: "bw-\(UUI
     let f = FakeSession()
     let d = freshDefaults()
     MonitoringSchedule(isEnabled: true, startMinuteOfDay: 6*60, endMinuteOfDay: 18*60).save(to: d)
-    let sch = MonitoringScheduler(session: f, defaults: d)
+    let sch = MonitoringScheduler(session: f, defaults: d, now: { at(0, 0) })
     sch.evaluate(now: at(5, 59)); #expect(f.startCount == 0)   // before window
     sch.evaluate(now: at(6, 0));  #expect(f.startCount == 1)   // rising edge -> start
     sch.evaluate(now: at(12, 0)); #expect(f.startCount == 1)   // still in window, no re-start
@@ -29,7 +29,7 @@ private func freshDefaults() -> UserDefaults { UserDefaults(suiteName: "bw-\(UUI
     let f = FakeSession()
     let d = freshDefaults()
     MonitoringSchedule(isEnabled: true, startMinuteOfDay: 6*60, endMinuteOfDay: 18*60).save(to: d)
-    let sch = MonitoringScheduler(session: f, defaults: d)
+    let sch = MonitoringScheduler(session: f, defaults: d, now: { at(0, 0) })
     sch.evaluate(now: at(6, 0)); #expect(f.startCount == 1)
     f.isMonitoring = false; f.isScheduleOwned = false          // user stopped it
     sch.evaluate(now: at(12, 0)); #expect(f.startCount == 1)   // NOT restarted (no edge)
@@ -39,25 +39,26 @@ private func freshDefaults() -> UserDefaults { UserDefaults(suiteName: "bw-\(UUI
     let f = FakeSession()
     let d = freshDefaults()
     MonitoringSchedule(isEnabled: true, startMinuteOfDay: 6*60, endMinuteOfDay: 18*60).save(to: d)
-    let sch = MonitoringScheduler(session: f, defaults: d)
+    let sch = MonitoringScheduler(session: f, defaults: d, now: { at(0, 0) })
     // A manual session is already running when the window opens.
     f.isMonitoring = true; f.isScheduleOwned = false
     sch.evaluate(now: at(6, 0)); #expect(f.startCount == 0)    // does not adopt
     sch.evaluate(now: at(18, 0)); #expect(f.stopCount == 0)    // does not stop a manual session
 }
 
-@MainActor @Test func testCatchUpStartsWhenEnabledMidWindow() {
+@MainActor @Test func testCatchUpStartsImmediatelyWhenEnabledMidWindow() {
     let f = FakeSession()
     let d = freshDefaults()
     MonitoringSchedule(isEnabled: true, startMinuteOfDay: 6*60, endMinuteOfDay: 18*60).save(to: d)
-    let sch = MonitoringScheduler(session: f, defaults: d)
-    sch.evaluate(now: at(10, 0)); #expect(f.startCount == 1)   // first eval already in window -> start
+    let sch = MonitoringScheduler(session: f, defaults: d, now: { at(10, 0) })
+    _ = sch                       // constructed mid-window
+    #expect(f.startCount == 1)    // immediate catch-up on init/activate, no evaluate() call
 }
 
 @MainActor @Test func testDisabledScheduleDoesNothing() {
     let f = FakeSession()
     let d = freshDefaults()
     MonitoringSchedule(isEnabled: false, startMinuteOfDay: 6*60, endMinuteOfDay: 18*60).save(to: d)
-    let sch = MonitoringScheduler(session: f, defaults: d)
+    let sch = MonitoringScheduler(session: f, defaults: d, now: { at(0, 0) })
     sch.evaluate(now: at(12, 0)); #expect(f.startCount == 0)
 }

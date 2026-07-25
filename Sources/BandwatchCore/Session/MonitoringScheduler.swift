@@ -20,7 +20,7 @@ import Observation
                 schedule.isEnabled ? activate() : deactivate()
             } else if schedule.isEnabled {
                 lastInWindow = nil            // times changed: re-evaluate cleanly
-                evaluate(now: Date())
+                evaluate(now: now())
             }
         }
     }
@@ -28,17 +28,22 @@ import Observation
     @ObservationIgnored private let session: SchedulableSession
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let calendar: Calendar
+    @ObservationIgnored private let now: () -> Date
     @ObservationIgnored private var lastInWindow: Bool?
     @ObservationIgnored private var tickTask: Task<Void, Never>?
+    // Safe unsafe: only ever read/written on MainActor while `self` is alive; by the time
+    // `deinit` runs (which also touches it off-actor-checked), no other reference to this
+    // instance exists, so there is no concurrent MainActor access to race with.
     @ObservationIgnored nonisolated(unsafe) private var awakeToken: (any NSObjectProtocol)?
 
     private static let tickInterval: Duration = .seconds(30)
 
     public init(session: SchedulableSession, defaults: UserDefaults = .bandwatch,
-                calendar: Calendar = .current) {
+                calendar: Calendar = .current, now: @escaping () -> Date = Date.init) {
         self.session = session
         self.defaults = defaults
         self.calendar = calendar
+        self.now = now
         self.schedule = MonitoringSchedule.load(from: defaults)
         if schedule.isEnabled { activate() }
     }
@@ -61,12 +66,13 @@ import Observation
     private func activate() {
         acquireKeepAwake()
         lastInWindow = nil
+        evaluate(now: now())          // catch up immediately: enabling/launching mid-window starts right away
         tickTask?.cancel()
         tickTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: Self.tickInterval)
                 guard let self, !Task.isCancelled else { return }
-                self.evaluate(now: Date())
+                self.evaluate(now: self.now())
             }
         }
     }
