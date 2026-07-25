@@ -29,11 +29,15 @@ struct MonitorView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 StatusSection(session: session)
+                // Schedule sits right under the Start/Stop control: both are
+                // "when to monitor", so they belong together and stay visible
+                // without scrolling to the configuration below.
+                ScheduleRow(scheduler: scheduler)
                 RecordingRow(status: session.recordingStatus)
 
                 // Configuration surfaced above the charts so it's immediately
                 // apparent what's being monitored and how.
-                PreferencesSection(session: session, scheduler: scheduler)
+                PreferencesSection(session: session)
 
                 SpectrumChart(session: session, sampleRate: 44100, fftSize: 8192)
                     .frame(height: 180)
@@ -292,7 +296,6 @@ private struct RecordingRow: View {
 /// re-renders independently based solely on what THAT child reads.
 private struct PreferencesSection: View {
     let session: MonitoringSession
-    let scheduler: MonitoringScheduler
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -300,7 +303,6 @@ private struct PreferencesSection: View {
             PresetsRow(session: session)
             SpeechWarningRow(session: session)
             ResponsePicker(session: session)
-            ScheduleRow(scheduler: scheduler)
         }
     }
 }
