@@ -90,14 +90,17 @@ struct BandwatchApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let session = MonitoringSession()
 
-    // Owned alongside `session`, for the same reason: it must live for the
-    // app's full lifetime so its 30s evaluation timer and keep-awake
-    // assertion keep running whether or not the monitor window is open.
-    // Depends on `session` directly above, so property initialization order
-    // (top to bottom) already guarantees `session` exists first.
+    // A lazy var (can't be a let because its initializer references `session`),
+    // force-initialized in applicationDidFinishLaunching so its 30s timer and
+    // keep-awake assertion keep running whether or not the monitor window is open.
     lazy var scheduler = MonitoringScheduler(session: session)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Force the scheduler to initialize now (it's a lazy var), so its evaluation
+        // timer and keep-awake start at launch regardless of whether the monitor
+        // window is ever built — a previously-enabled schedule must resume on launch.
+        _ = scheduler
+
         // Bandwatch has no text-editing or view/toolbar commands, so the
         // standard Edit and View menus are just empty noise next to the app's
         // own menus. Remove them from the menu bar.
