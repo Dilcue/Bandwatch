@@ -19,7 +19,10 @@ import Observation
             if schedule.isEnabled != oldValue.isEnabled {
                 schedule.isEnabled ? activate() : deactivate()
             } else if schedule.isEnabled {
-                lastInWindow = nil            // times changed: re-evaluate cleanly
+                // Times changed: seed from current owned-running state (not nil) so that
+                // if the new window excludes "now" while we own a running session, the
+                // falling-edge branch in evaluate(now:) can still fire and stop it.
+                lastInWindow = session.isMonitoring && session.isScheduleOwned
                 evaluate(now: now())
             }
         }
@@ -65,7 +68,10 @@ import Observation
 
     private func activate() {
         acquireKeepAwake()
-        lastInWindow = nil
+        // Seed from current owned-running state (not nil) so that if the newly-enabled
+        // window excludes "now" while we own a running session, the falling-edge branch
+        // in evaluate(now:) can still fire and stop it.
+        lastInWindow = session.isMonitoring && session.isScheduleOwned
         evaluate(now: now())          // catch up immediately: enabling/launching mid-window starts right away
         tickTask?.cancel()
         tickTask = Task { [weak self] in

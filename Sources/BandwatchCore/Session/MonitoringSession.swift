@@ -446,6 +446,12 @@ public final class MonitoringSession {
     /// device isn't currently enumerated.
     @ObservationIgnored private var persistedInputUID: String?
     @ObservationIgnored private var isResolvingInput = false
+    /// Synchronous re-entrancy guard for `start(bySchedule:)`: that method awaits
+    /// (permission request) before `isRunning` flips true, so two overlapping calls
+    /// (e.g. a user click racing the scheduler) could both pass the `!isRunning`
+    /// guard and both build an engine. Set/cleared synchronously around the whole
+    /// method body so a second concurrent MainActor call bails out immediately.
+    @ObservationIgnored private var isStarting = false
     static let inputDeviceDefaultsKey = "bandwatch.selectedInputDeviceUID"
     static let thresholdDefaultsKey = "bandwatch.triggerDBFS"
     /// The detector trigger threshold used until the user sets their own (which
@@ -715,7 +721,9 @@ public final class MonitoringSession {
     }
 
     public func start(bySchedule: Bool = false) async {
-        guard !isRunning else { return }
+        guard !isRunning, !isStarting else { return }
+        isStarting = true
+        defer { isStarting = false }
         lastError = nil
 
         // The app never registers with TCC — and so never appears in System

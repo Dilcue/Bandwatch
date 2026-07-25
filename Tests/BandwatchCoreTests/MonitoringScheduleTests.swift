@@ -27,7 +27,9 @@ import Foundation
 }
 
 @Test func testPersistenceRoundTripAndDefault() {
-    let d = UserDefaults(suiteName: "bw-test-\(UUID().uuidString)")!
+    let suiteName = "bw-test-\(UUID().uuidString)"
+    let d = UserDefaults(suiteName: suiteName)!
+    defer { d.removePersistentDomain(forName: suiteName) }
     // Fresh: disabled, 6-18.
     let def = MonitoringSchedule.load(from: d)
     #expect(def == MonitoringSchedule(isEnabled: false, startMinuteOfDay: 360, endMinuteOfDay: 1080))
