@@ -119,14 +119,14 @@ struct MonitoringActions: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Button(session.isRunning ? "Stop monitoring" : "Start monitoring") {
+        Button(session.isRunning ? "Stop Monitoring" : "Start Monitoring") {
             if session.isRunning {
                 session.stop()
             } else {
                 Task { await session.start() }
             }
         }
-        Button("Open window") {
+        Button("Open Window…") {
             openWindow(id: BandwatchApp.monitorWindowID)
             NSApplication.shared.activate(ignoringOtherApps: true)
         }
@@ -150,9 +150,13 @@ private struct MenuBarContent: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Text(session.isRunning
-             ? String(format: "Monitoring — %.1f dBFS", session.latestFrame?.bandLevelDBFS ?? -120)
-             : "Stopped")
+        // Just the run state, NOT a live level readout. Reading `latestFrame`
+        // here rebuilt the entire menu ~12x/sec while it was open, which reset
+        // the mouse-hover highlight every frame and made items nearly impossible
+        // to click (the selection "jumped"). `isRunning` only changes on
+        // Start/Stop, so the open menu stays still. The live level lives in the
+        // main window.
+        Text(session.isRunning ? "Monitoring" : "Stopped")
 
         // Recording state must be visible without opening the window. Not
         // merely "is a session active" -- if writes are failing, that must
@@ -172,10 +176,10 @@ private struct MenuBarContent: View {
     }
 
     private var recordingSummary: String {
-        guard let status = session.recordingStatus, status.isRecording else { return "Not recording" }
+        guard let status = session.recordingStatus, status.isRecording else { return "Not Recording" }
         if status.consecutiveWriteFailures > 0 {
-            return "Recording — writes failing (\(status.consecutiveWriteFailures) in a row)"
+            return "Recording — Writes Failing (\(status.consecutiveWriteFailures) in a Row)"
         }
-        return "Recording — \(status.eventsWritten) clips"
+        return "Recording — \(status.eventsWritten) Clips"
     }
 }

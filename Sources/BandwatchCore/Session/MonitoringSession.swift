@@ -857,7 +857,14 @@ public final class MonitoringSession {
                         // (see its doc comment, I3) -- merge it in rather than
                         // publishing the coordinator's status verbatim, which
                         // knows nothing about drops that never reached it.
-                        self.recordingStatus = status.withDroppedArchiveWindowCount(self.droppedArchiveWindowCount)
+                        //
+                        // Republish only on a real change: an @Observable
+                        // assignment invalidates observers even when the value is
+                        // identical, and this polls at 1 Hz -- without the guard,
+                        // the menu-bar dropdown (which reads recordingStatus)
+                        // rebuilt once a second while open, disturbing selection.
+                        let merged = status.withDroppedArchiveWindowCount(self.droppedArchiveWindowCount)
+                        if self.recordingStatus != merged { self.recordingStatus = merged }
 
                         // Ride this same poll to heartbeat the monitoring span every
                         // `heartbeatPollCount` polls (~30s at 1 Hz) -- see that
@@ -1260,7 +1267,8 @@ public final class MonitoringSession {
                 await c.enforceStorageFloor(at: Date())
                 let status = await c.status()
                 guard let self, !Task.isCancelled else { return }
-                self.recordingStatus = status.withDroppedArchiveWindowCount(self.droppedArchiveWindowCount)
+                let merged = status.withDroppedArchiveWindowCount(self.droppedArchiveWindowCount)
+                if self.recordingStatus != merged { self.recordingStatus = merged }
 
                 // Mirrors start()'s own heartbeat wiring -- see that task's comment.
                 pollsSinceHeartbeat += 1
