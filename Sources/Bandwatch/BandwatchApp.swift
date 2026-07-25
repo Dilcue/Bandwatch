@@ -21,7 +21,7 @@ struct BandwatchApp: App {
         // like nothing happened. Requires macOS 15, which is why the package
         // floor is .v15.
         Window("Bandwatch", id: Self.monitorWindowID) {
-            MonitorView(session: appDelegate.session)
+            MonitorView(session: appDelegate.session, scheduler: appDelegate.scheduler)
         }
         .defaultLaunchBehavior(.presented)
         // Always present the main window at launch. Without disabling
@@ -89,6 +89,13 @@ struct BandwatchApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let session = MonitoringSession()
+
+    // Owned alongside `session`, for the same reason: it must live for the
+    // app's full lifetime so its 30s evaluation timer and keep-awake
+    // assertion keep running whether or not the monitor window is open.
+    // Depends on `session` directly above, so property initialization order
+    // (top to bottom) already guarantees `session` exists first.
+    lazy var scheduler = MonitoringScheduler(session: session)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Bandwatch has no text-editing or view/toolbar commands, so the

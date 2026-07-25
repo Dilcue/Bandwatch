@@ -16,6 +16,7 @@ import BandwatchCore
 /// which confines invalidation to just the child that actually changed.
 struct MonitorView: View {
     @Bindable var session: MonitoringSession
+    let scheduler: MonitoringScheduler
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
@@ -32,7 +33,7 @@ struct MonitorView: View {
 
                 // Configuration surfaced above the charts so it's immediately
                 // apparent what's being monitored and how.
-                PreferencesSection(session: session)
+                PreferencesSection(session: session, scheduler: scheduler)
 
                 SpectrumChart(session: session, sampleRate: 44100, fftSize: 8192)
                     .frame(height: 180)
@@ -291,6 +292,7 @@ private struct RecordingRow: View {
 /// re-renders independently based solely on what THAT child reads.
 private struct PreferencesSection: View {
     let session: MonitoringSession
+    let scheduler: MonitoringScheduler
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -298,7 +300,51 @@ private struct PreferencesSection: View {
             PresetsRow(session: session)
             SpeechWarningRow(session: session)
             ResponsePicker(session: session)
+            ScheduleRow(scheduler: scheduler)
         }
+    }
+}
+
+/// Automatic start/stop window, independent of manual Start/Stop. Only
+/// re-renders when `schedule` changes (toggle flips, time drags), never on
+/// analysis frames.
+private struct ScheduleRow: View {
+    @Bindable var scheduler: MonitoringScheduler
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle("Automatic schedule", isOn: $scheduler.schedule.isEnabled)
+            if scheduler.schedule.isEnabled {
+                HStack(spacing: 8) {
+                    DatePicker("From", selection: startBinding, displayedComponents: .hourAndMinute)
+                    DatePicker("To", selection: endBinding, displayedComponents: .hourAndMinute)
+                }
+                .controlSize(.small)
+                Text(scheduler.schedule.startMinuteOfDay > scheduler.schedule.endMinuteOfDay
+                     ? "Runs overnight, every day."
+                     : "Runs daily during this window.")
+                    .font(.caption2).foregroundStyle(Palette.mutedInk(scheme))
+                // REQUIRED ownership note (spec):
+                Text("The schedule starts and stops its own sessions. Monitoring you start manually keeps running until you stop it.")
+                    .font(.caption2).foregroundStyle(Palette.mutedInk(scheme))
+            }
+        }
+    }
+
+    // DatePicker works in Date; bridge to minutes-of-day (today at that time).
+    private var startBinding: Binding<Date> { minuteBinding(\.startMinuteOfDay) }
+    private var endBinding: Binding<Date> { minuteBinding(\.endMinuteOfDay) }
+    private func minuteBinding(_ kp: WritableKeyPath<MonitoringSchedule, Int>) -> Binding<Date> {
+        Binding(
+            get: {
+                let m = scheduler.schedule[keyPath: kp]
+                return Calendar.current.date(bySettingHour: m / 60, minute: m % 60, second: 0, of: Date()) ?? Date()
+            },
+            set: { newDate in
+                let c = Calendar.current.dateComponents([.hour, .minute], from: newDate)
+                scheduler.schedule[keyPath: kp] = (c.hour ?? 0) * 60 + (c.minute ?? 0)
+            })
     }
 }
 
