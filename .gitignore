@@ -5,3 +5,6 @@ build/
 .superpowers/
 dist/
 docs/superpowers/
+
+# Editor/local tooling
+.vscode/
