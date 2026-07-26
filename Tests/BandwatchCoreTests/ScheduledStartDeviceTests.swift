@@ -21,7 +21,6 @@ private struct FakeEnumerator: InputDeviceEnumerating {
     var devices: [AudioInputDevice]
     var defaultUID: String?
     func available() -> [AudioInputDevice] { devices }
-    func systemDefaultUID() -> String? { defaultUID }
 }
 
 private final class MutableEnumerator: InputDeviceEnumerating, @unchecked Sendable {
@@ -32,7 +31,6 @@ private final class MutableEnumerator: InputDeviceEnumerating, @unchecked Sendab
         self.devices = devices; self.defaultUID = defaultUID
     }
     func available() -> [AudioInputDevice] { devices }
-    func systemDefaultUID() -> String? { defaultUID }
     func startObserving(onChange: @escaping @Sendable () -> Void) { self.onChange = onChange }
     func stopObserving() { onChange = nil }
     func simulateChange(newDevices: [AudioInputDevice]) {

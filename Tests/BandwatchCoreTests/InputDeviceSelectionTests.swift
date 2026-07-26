@@ -6,7 +6,6 @@ private struct FakeEnumerator: InputDeviceEnumerating {
     var devices: [AudioInputDevice]
     var defaultUID: String?
     func available() -> [AudioInputDevice] { devices }
-    func systemDefaultUID() -> String? { defaultUID }
 }
 
 private func freshDefaults() -> UserDefaults {
@@ -81,8 +80,8 @@ private let board = AudioInputDevice(uid: "board-uid", name: "USB Audio CODEC")
     let enumr = FakeEnumerator(devices: [board], defaultUID: "board-uid")
     let s = MonitoringSession(deviceEnumerator: enumr, defaults: freshDefaults())
     #expect(s.selectedInputDeviceUID == nil)
-    // No device ever chosen and no pinned preference — the documented placeholder,
-    // never `systemDefaultUID()` ("board-uid").
+    // No device ever chosen and no pinned preference — returns the documented
+    // placeholder instead of falling back to system default.
     #expect(s.recordingDeviceUID() == "unknown")
 }
 
@@ -105,7 +104,6 @@ private final class MutableEnumerator: InputDeviceEnumerating, @unchecked Sendab
         self.devices = devices; self.defaultUID = defaultUID
     }
     func available() -> [AudioInputDevice] { devices }
-    func systemDefaultUID() -> String? { defaultUID }
     func startObserving(onChange: @escaping @Sendable () -> Void) { self.onChange = onChange }
     func stopObserving() { onChange = nil }
     /// Swap the device list and fire the observer, as a hot-plug would.

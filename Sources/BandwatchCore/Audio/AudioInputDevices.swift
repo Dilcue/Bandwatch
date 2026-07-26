@@ -22,8 +22,6 @@ public struct AudioInputDevice: Equatable, Sendable, Identifiable {
 public protocol InputDeviceEnumerating: Sendable {
     /// All current input-capable devices, in system order.
     func available() -> [AudioInputDevice]
-    /// UID of the operating system's current default input device, if any.
-    func systemDefaultUID() -> String?
     /// Begin observing hardware topology changes. `onChange` is invoked
     /// whenever the set of input devices may have changed. Delivery thread is
     /// implementation-defined; consumers must hop to their own isolation.
@@ -83,11 +81,6 @@ public final class CoreAudioInputDevices: InputDeviceEnumerating, @unchecked Sen
             else { return nil }
             return AudioInputDevice(uid: uid, name: name)
         }
-    }
-
-    public func systemDefaultUID() -> String? {
-        guard let id = Self.defaultInputDeviceID() else { return nil }
-        return Self.stringProperty(id, kAudioDevicePropertyDeviceUID)
     }
 
     /// Resolves a saved UID to a live device ID, or nil if the device is not

@@ -375,7 +375,6 @@ private func freshDefaults() -> (defaults: UserDefaults, cleanup: () -> Void) {
 private struct SchedulerFakeEnumerator: InputDeviceEnumerating {
     var devices: [AudioInputDevice]
     func available() -> [AudioInputDevice] { devices }
-    func systemDefaultUID() -> String? { nil }
 }
 
 private func schedulerTestFreshDefaults() -> UserDefaults {
