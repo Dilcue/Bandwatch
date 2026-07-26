@@ -765,6 +765,11 @@ public final class MonitoringSession {
         // WITHOUT clearing the preference, and the picker's onAppear
         // `refreshInputDevices()` re-resolves once the list is ready (recovering
         // the saved device).
+        // Upgrade note: a user who previously ran on "System Default" has no
+        // persisted UID here, so persistedInputUID stays nil = "no device
+        // selected" — Start and the schedule are gated until they pick one.
+        // This is intentional (an evidence tool must know its exact input);
+        // no data migration is needed.
         self.persistedInputUID = defaults.string(forKey: Self.inputDeviceDefaultsKey)
         self.persistedInputDeviceName = defaults.string(forKey: Self.inputDeviceNameDefaultsKey)
         self.availableInputDevices = deviceEnumerator.available()
