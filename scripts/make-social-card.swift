@@ -64,7 +64,7 @@ let descAttrs: [NSAttributedString.Key: Any] = [
     .foregroundColor: subtle,
 ]
 let featAttrs: [NSAttributedString.Key: Any] = [
-    .font: NSFont.systemFont(ofSize: 30, weight: .regular),
+    .font: NSFont.systemFont(ofSize: 26, weight: .regular),
     .foregroundColor: subtle,
 ]
 
