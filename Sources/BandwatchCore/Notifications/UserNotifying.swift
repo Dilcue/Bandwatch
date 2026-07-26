@@ -71,34 +71,64 @@ public extension UserNotifying {
 /// that prompts, so callers control when the OS permission dialog can appear.
 @MainActor
 public final class SystemUserNotifier: UserNotifying {
+    /// Seam over `UNUserNotificationCenter.notificationSettings()`: reports
+    /// whether the app is currently authorized (or provisional) to post
+    /// notifications. Injectable so tests can drive denied/authorized
+    /// sequences without a real notification center. Defaults to the real
+    /// check.
+    private let isAuthorized: () async -> Bool
+
+    /// Seam over `UNUserNotificationCenter.add(_:)`: hands off a fully-built
+    /// request for delivery. Injectable for the same reason as
+    /// `isAuthorized`. Defaults to the real delivery call.
+    private let deliver: (UNNotificationRequest) async -> Void
+
+    /// Ids that have actually been delivered this session. An id is only
+    /// inserted once delivery is really going to happen -- see `post`.
     private var postedIDs: Set<String> = []
 
-    public init() {}
+    public init(
+        isAuthorized: @escaping () async -> Bool = {
+            let settings = await UNUserNotificationCenter.current().notificationSettings()
+            return settings.authorizationStatus == .authorized
+                || settings.authorizationStatus == .provisional
+        },
+        deliver: @escaping (UNNotificationRequest) async -> Void = { request in
+            try? await UNUserNotificationCenter.current().add(request)
+        }
+    ) {
+        self.isAuthorized = isAuthorized
+        self.deliver = deliver
+    }
 
     public func requestAuthorization() async {
         _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
     }
 
     public func post(title: String, body: String, id: String) {
-        // Dedupe up front: a condition that keeps recurring (e.g. no device
-        // selected on every subsequent scheduled run) must only ever notify
-        // once per session, regardless of how the authorization check below
-        // resolves.
-        guard postedIDs.insert(id).inserted else { return }
-
         Task {
-            let center = UNUserNotificationCenter.current()
-            let settings = await center.notificationSettings()
-            guard settings.authorizationStatus == .authorized
-                || settings.authorizationStatus == .provisional else { return }
+            // Authorization is checked *before* dedupe is recorded. If this
+            // resolves to false (denied, undetermined, or not yet granted),
+            // nothing about this id is remembered -- a later call with the
+            // same id (e.g. after the user grants permission in System
+            // Settings) must still be able to deliver.
+            guard await isAuthorized() else { return }
+
+            // Check-and-insert is one synchronous expression with no `await`
+            // between the membership check and the insert, so it is atomic
+            // with respect to any other `post` call racing on the same id:
+            // whichever `Task` reaches this line first wins, and the other
+            // is dropped as a dedupe, never as a false permission failure.
+            guard postedIDs.insert(id).inserted else { return }
 
             let content = UNMutableNotificationContent()
             content.title = title
             content.body = body
+            content.sound = .default
 
             // `trigger: nil` delivers immediately.
             let request = UNNotificationRequest(identifier: id, content: content, trigger: nil)
-            try? await center.add(request)
+            await deliver(request)
         }
     }
 }
