@@ -20,38 +20,59 @@ struct MonitorView: View {
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        // A ScrollView, not a plain VStack: when a status banner appears the
-        // content can exceed a short window, and without scrolling the overflow
-        // was clipping the header up under the title bar. With it, the window
-        // stays fully usable and simply scrolls if it can't fit everything.
-        // Content is top-aligned naturally (no Spacer needed), matching the old
-        // layout when the window is tall enough to show everything.
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                StatusSection(session: session)
-                // Schedule sits right under the Start/Stop control: both are
-                // "when to monitor", so they belong together and stay visible
-                // without scrolling to the configuration below.
-                ScheduleRow(scheduler: scheduler)
-                RecordingRow(status: session.recordingStatus)
+        VStack(alignment: .leading, spacing: 12) {
+            // Status indicators (state, recording, banners) — full width on top.
+            StatusSection(session: session)
+            RecordingRow(status: session.recordingStatus)
 
-                // Configuration surfaced above the charts so it's immediately
-                // apparent what's being monitored and how.
+            // Configuration on the left; the Start/Stop button with the schedule
+            // directly beneath it on the right. Both columns are top-aligned, so
+            // the control block lines up with the Input row. Start is the first
+            // item in its own fixed-width, leading-aligned column, so it stays
+            // put when the schedule expands — it never moves.
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 10) {
+                    StartStopButton(session: session)
+                    ScheduleRow(scheduler: scheduler)
+                }
+                .frame(width: 340, alignment: .leading)
+
                 PreferencesSection(session: session)
-
-                SpectrumChart(session: session, sampleRate: 44100, fftSize: 8192)
-                    .frame(height: 180)
-
-                LevelChart(session: session)
-                    .frame(height: 140)
-
-                ReadoutSection(session: session)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            // Extra breathing room separating the status/config band above from
+            // the charts below.
+            .padding(.vertical, 10)
+
+            SpectrumChart(session: session, sampleRate: 44100, fftSize: 8192)
+                .frame(height: 180)
+
+            LevelChart(session: session)
+                .frame(height: 140)
+
+            ReadoutSection(session: session)
         }
-        .frame(minWidth: 640, minHeight: 560)
+        .padding(16)
+        // Top-aligned so that if the window is ever shorter than the content, it
+        // clips off the BOTTOM (readouts) rather than pushing the header up.
+        .frame(minWidth: 640, minHeight: 600, alignment: .top)
         .background(Palette.surface(scheme))
+    }
+}
+
+/// The Start/Stop button — the top item of the top-right control column,
+/// directly above the schedule. Reads `session.isRunning` (observed) for its
+/// label and action.
+private struct StartStopButton: View {
+    let session: MonitoringSession
+    var body: some View {
+        Button(session.isRunning ? "Stop Monitoring" : "Start Monitoring") {
+            if session.isRunning {
+                session.stop()
+            } else {
+                Task { await session.start() }
+            }
+        }
     }
 }
 
@@ -91,6 +112,8 @@ private struct StatusSection: View {
     }
 
     private var header: some View {
+        // Start/Stop lives in the top-right control block, directly above the
+        // schedule — see MonitorView.body. This is just the status dot + text.
         HStack {
             Circle()
                 .fill(headerDotColor)
@@ -98,14 +121,6 @@ private struct StatusSection: View {
             Text(headerText)
                 .font(.headline)
                 .foregroundStyle(Palette.primaryInk(scheme))
-            Spacer()
-            Button(session.isRunning ? "Stop" : "Start") {
-                if session.isRunning {
-                    session.stop()
-                } else {
-                    Task { await session.start() }
-                }
-            }
         }
     }
 
@@ -303,6 +318,7 @@ private struct PreferencesSection: View {
             PresetsRow(session: session)
             SpeechWarningRow(session: session)
             ResponsePicker(session: session)
+            SuggestedThresholdRow(session: session)
         }
     }
 }
@@ -317,20 +333,33 @@ private struct ScheduleRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Toggle("Automatic schedule", isOn: $scheduler.schedule.isEnabled)
-            if scheduler.schedule.isEnabled {
+
+            // The pickers and notes ALWAYS occupy their space — invisible and
+            // non-interactive until the schedule is enabled — so the column is
+            // permanently at its full height and toggling never reflows the
+            // window.
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
                     DatePicker("From", selection: startBinding, displayedComponents: .hourAndMinute)
                     DatePicker("To", selection: endBinding, displayedComponents: .hourAndMinute)
                 }
                 .controlSize(.small)
-                Text(scheduler.schedule.startMinuteOfDay > scheduler.schedule.endMinuteOfDay
-                     ? "Runs overnight, every day."
-                     : "Runs daily during this window.")
+                // REQUIRED ownership note (spec): the schedule only ever starts
+                // and stops sessions it started itself; manual sessions are left
+                // alone. The hard width cap forces wrapping regardless of the
+                // picker row's width.
+                Text("Scheduler starts and stops its own sessions.")
                     .font(.caption2).foregroundStyle(Palette.mutedInk(scheme))
-                // REQUIRED ownership note (spec):
-                Text("The schedule starts and stops its own sessions. Monitoring you start manually keeps running until you stop it.")
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: 324, alignment: .leading)
+                Text("Monitoring you start manually keeps running until you stop it.")
                     .font(.caption2).foregroundStyle(Palette.mutedInk(scheme))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: 324, alignment: .leading)
             }
+            .opacity(scheduler.schedule.isEnabled ? 1 : 0)
+            .disabled(!scheduler.schedule.isEnabled)
+            .accessibilityHidden(!scheduler.schedule.isEnabled)
         }
     }
 
@@ -376,10 +405,7 @@ private struct ReadoutSection: View {
     let session: MonitoringSession
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ReadoutRow(session: session)
-            SuggestedThresholdButton(session: session)
-        }
+        ReadoutRow(session: session)
     }
 }
 
@@ -395,6 +421,7 @@ private struct InputDeviceRow: View {
                 Text("Input:")
                     .font(.caption)
                     .foregroundStyle(Palette.mutedInk(scheme))
+                    .frame(width: 72, alignment: .leading)
                 Picker("Input", selection: $session.selectedInputDeviceUID) {
                     Text("System Default").tag(String?.none)
                     ForEach(session.availableInputDevices) { device in
@@ -403,7 +430,7 @@ private struct InputDeviceRow: View {
                 }
                 .labelsHidden()
                 .controlSize(.small)
-                .frame(maxWidth: 260)
+                .frame(maxWidth: 260, alignment: .leading)
                 .disabled(session.isRunning)
             }
             if let notice = session.inputNotice {
@@ -427,6 +454,7 @@ private struct PresetsRow: View {
             Text("Presets:")
                 .font(.caption)
                 .foregroundStyle(Palette.mutedInk(scheme))
+                .frame(width: 72, alignment: .leading)
             Button("Bass 20–120 Hz") { session.band = .bassSubwoofer }
             Button("Whine 2–8 kHz") { session.band = .applianceWhine }
             Button("Beeping 1–4 kHz") { session.band = .beeping }
@@ -446,6 +474,7 @@ private struct ResponsePicker: View {
             Text("Response:")
                 .font(.caption)
                 .foregroundStyle(Palette.mutedInk(scheme))
+                .frame(width: 72, alignment: .leading)
             Picker("Response", selection: $session.timeWeighting) {
                 ForEach(TimeWeighting.allCases, id: \.self) { weighting in
                     Text(weighting.displayName).tag(weighting)
@@ -454,7 +483,7 @@ private struct ResponsePicker: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .controlSize(.small)
-            .frame(width: 140)
+            .frame(width: 140, alignment: .leading)
         }
     }
 }
@@ -489,20 +518,36 @@ private struct LiveLevelText: View {
     }
 }
 
-/// Reads `suggestedThresholdDBFS` on its own, isolated from the rest of the
-/// controls. This is the view whose appearance, once the baseline matures,
-/// was observed as a step in the CPU curve at ~3 minutes -- corroborating
-/// evidence that reading it in the shared parent body (as it used to be)
-/// pulled it into the same per-frame layout pass as everything else.
-private struct SuggestedThresholdButton: View {
+/// A persistent configuration row showing the suggested detection threshold.
+/// Reads "Unknown" until the baseline matures (~3 minutes of monitoring), then
+/// shows the value with a button to apply it. Reads `suggestedThresholdDBFS` on
+/// its own, isolated from the rest of the controls: its appearance, once the
+/// baseline matures, was observed as a step in the CPU curve at ~3 minutes --
+/// corroborating evidence that reading it in the shared parent body (as it used
+/// to) pulled it into the same per-frame layout pass as everything else.
+private struct SuggestedThresholdRow: View {
     let session: MonitoringSession
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        if let suggested = session.suggestedThresholdDBFS {
-            Button("Use suggested threshold (\(String(format: "%.1f", suggested)) dBFS)") {
-                session.applySuggestedThreshold()
+        HStack(spacing: 8) {
+            Text("Suggested Threshold:")
+                .font(.caption)
+                .foregroundStyle(Palette.mutedInk(scheme))
+            if let suggested = session.suggestedThresholdDBFS {
+                Text("\(String(format: "%.1f", suggested)) dBFS")
+                    .font(.caption)
+                    .foregroundStyle(Palette.primaryInk(scheme))
+                Button("Use") { session.applySuggestedThreshold() }
+                    .controlSize(.small)
+            } else {
+                Text("Will Be Determined")
+                    .font(.caption)
+                    .foregroundStyle(Palette.mutedInk(scheme))
             }
-            .controlSize(.small)
         }
+        // Nudge down so the spacing to the Response row above matches the
+        // gaps between the other configuration rows.
+        .padding(.top, 4)
     }
 }
