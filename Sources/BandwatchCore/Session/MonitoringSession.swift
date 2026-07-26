@@ -102,6 +102,13 @@ public final class MonitoringSession {
     /// attempt that set it.
     public private(set) var startBlockedReason: StartBlockedReason?
 
+    /// True while `MonitoringScheduler`'s armed-idle watch considers the
+    /// schedule armed (enabled, nothing running) AND the selected device
+    /// unavailable. Purely a banner flag for the UI -- this session never
+    /// sets it itself, since only the scheduler knows whether the schedule
+    /// is currently armed (see `SchedulableSession.armedDeviceMissing`).
+    public var armedDeviceMissing: Bool = false
+
     public static let preRollSeconds: TimeInterval = 10
 
     public private(set) var recordingStatus: RecordingStatus?
@@ -485,6 +492,11 @@ public final class MonitoringSession {
     /// guard and both build an engine. Set/cleared synchronously around the whole
     /// method body so a second concurrent MainActor call bails out immediately.
     @ObservationIgnored private var isStarting = false
+    /// Optional notification client for unattended scheduled-start failures
+    /// (Task 4). Nil by default -- production code (`AppDelegate`) passes the
+    /// real `SystemUserNotifier`; tests that don't care leave it nil, in
+    /// which case the `notifier?.post(...)` calls below are simply no-ops.
+    @ObservationIgnored private let notifier: UserNotifying?
     static let inputDeviceDefaultsKey = "bandwatch.selectedInputDeviceUID"
     static let inputDeviceNameDefaultsKey = "bandwatch.selectedInputDeviceName"
     static let thresholdDefaultsKey = "bandwatch.triggerDBFS"
@@ -578,6 +590,10 @@ public final class MonitoringSession {
             resolveInputSelection()
             resumeAfterReconnect()
         }
+        // Fires on every branch, regardless of whether this session itself
+        // is running -- the armed-idle watch specifically cares about the
+        // NOT-running case, so it must hear about a topology change then too.
+        onDeviceAvailabilityChange?()
     }
 
     /// Pinned device vanished mid-session: tear down capture (so AUHAL's silent
@@ -664,6 +680,25 @@ public final class MonitoringSession {
     /// consult `inputNotice` (non-nil only for the latter).
     public func hasUsableSelectedDevice() -> Bool { selectedInputDeviceUID != nil }
 
+    /// Best-known display name of the currently pinned/persisted device --
+    /// the last-chosen UID's remembered name, regardless of whether that
+    /// device is currently present. Nil only when nothing has EVER been
+    /// selected. Exists for `MonitoringScheduler`'s armed-idle watch, which
+    /// needs to name the device in its notification copy without reaching
+    /// into this session's private persistence state directly.
+    public func selectedDeviceDisplayName() -> String? {
+        guard let uid = persistedInputUID else { return nil }
+        return persistedInputDeviceName ?? uid
+    }
+
+    /// Hook for observers of Core Audio hardware-topology changes -- the app
+    /// wires this to `scheduler.deviceAvailabilityChanged()` so the
+    /// scheduler's armed-idle watch reacts immediately to a device
+    /// appearing/disappearing, rather than only on its periodic tick. Called
+    /// unconditionally at the end of `handleDeviceChange()`, regardless of
+    /// which branch fired.
+    public var onDeviceAvailabilityChange: (() -> Void)?
+
     /// The device UID to stamp on recorded events: the selected device when
     /// present. There is no system-default fallback — capture never silently
     /// targets an unpicked device — so when no device is currently usable this
@@ -681,12 +716,14 @@ public final class MonitoringSession {
 
     public init(sampleRate: Double = 44100, fftSize: Int = 8192, hopSize: Int = 2048,
                 deviceEnumerator: InputDeviceEnumerating = CoreAudioInputDevices(),
-                defaults: UserDefaults = .bandwatch) {
+                defaults: UserDefaults = .bandwatch,
+                notifier: UserNotifying? = nil) {
         self.sampleRate = sampleRate
         self.fftSize = fftSize
         self.hopSize = hopSize
         self.deviceEnumerator = deviceEnumerator
         self.defaults = defaults
+        self.notifier = notifier
 
         guard let analyzer = SpectrumAnalyzer(fftSize: fftSize, sampleRate: sampleRate) else {
             preconditionFailure("fftSize must be a power of two")
@@ -875,9 +912,10 @@ public final class MonitoringSession {
             guard let persisted = persistedInputUID else {
                 // Nothing has ever been chosen. Manual: this signals the UI
                 // to prompt for a device. Scheduled: there is nothing to
-                // record from, so no run happens at all.
-                // (Task 4 posts the notification at this point.)
+                // record from, so no run happens at all -- and nobody is
+                // watching the app to see `startBlockedReason`, so alert.
                 startBlockedReason = .noDeviceSelected
+                if bySchedule { notifier?.post(blocked: .noDeviceSelected) }
                 return   // isRunning stays false
             }
             // A device IS chosen but currently absent: bring the coordinator
@@ -886,11 +924,14 @@ public final class MonitoringSession {
             // path auto-resumes capture once it's back (see the
             // `resolveInputSelection()` call added there for this case).
             // Capture is never opened here — no fallback device is ever used.
-            // (Task 4 posts the notification at this point.)
+            // Scheduled only, same reasoning as the case above -- the manual
+            // path already shows `captureConnection`/`inputNotice` live in the
+            // UI to a user who is right there.
             let name = persistedInputDeviceName ?? persisted
             captureConnection = .awaitingReconnect(deviceName: name)
             isRunning = true
             startedBySchedule = bySchedule
+            if bySchedule { notifier?.post(blocked: .deviceUnavailable(name: name)) }
             await bringUpCoordinatorForAwaitingStart()
             if !deviceDisconnectGapOpen, let c = coordinator {
                 deviceDisconnectGapOpen = true

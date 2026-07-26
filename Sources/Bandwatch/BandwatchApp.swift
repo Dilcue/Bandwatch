@@ -88,18 +88,36 @@ struct BandwatchApp: App {
 /// has genuinely finished.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    let session = MonitoringSession()
+    // Shared notification client (Task 4): `session` uses it for blocked
+    // scheduled-start alerts, `scheduler` for the armed-idle device watch.
+    // One instance so both go through the same authorization/dedupe surface.
+    private let notifier = SystemUserNotifier()
+
+    let session: MonitoringSession
 
     // A lazy var (can't be a let because its initializer references `session`),
     // force-initialized in applicationDidFinishLaunching so its 30s timer and
     // keep-awake assertion keep running whether or not the monitor window is open.
-    lazy var scheduler = MonitoringScheduler(session: session)
+    lazy var scheduler = MonitoringScheduler(session: session, notifier: notifier)
+
+    override init() {
+        session = MonitoringSession(notifier: notifier)
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Force the scheduler to initialize now (it's a lazy var), so its evaluation
         // timer and keep-awake start at launch regardless of whether the monitor
         // window is ever built — a previously-enabled schedule must resume on launch.
         _ = scheduler
+
+        // Wire the scheduler's armed-idle watch to real Core Audio device
+        // changes, so it reacts immediately rather than waiting out the 30s
+        // tick. Set after forcing `scheduler` above so there's something to
+        // (weakly) capture.
+        session.onDeviceAvailabilityChange = { [weak scheduler] in
+            scheduler?.deviceAvailabilityChanged()
+        }
 
         // Bandwatch has no text-editing or view/toolbar commands, so the
         // standard Edit and View menus are just empty noise next to the app's
