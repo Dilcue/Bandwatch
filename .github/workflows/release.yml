@@ -1,9 +1,16 @@
 name: Release
 
-# Cut a release by pushing a tag, e.g.:
-#   git tag v0.2.0 && git push origin v0.2.0
-# This builds the universal (Apple Silicon + Intel) .app, zips it, and attaches
-# it to the release for that tag (creating the release if it doesn't exist yet).
+# Cut a release by pushing an ANNOTATED tag whose message is the changelog
+# (written in Markdown), e.g.:
+#   git tag -a v0.2.3 -m "## What's new in 0.2.3
+#
+#   - Fixed the frobnicator"
+#   git push origin v0.2.3
+# The tag message becomes the top of the release notes; this workflow appends
+# the standard install instructions below it, builds the universal (Apple
+# Silicon + Intel) .app, zips it, and attaches it to the release for that tag
+# (creating the release if it doesn't exist yet). A lightweight tag with no
+# message still works — the notes are then just the install instructions.
 
 on:
   push:
@@ -47,8 +54,23 @@ jobs:
           ASSET="dist/Bandwatch-${VERSION}-universal.zip"
           test -f "$ASSET" || { echo "expected asset not found: $ASSET"; ls -la dist; exit 1; }
 
+          # Use the annotated tag's message as the changelog atop the notes.
+          # actions/checkout can leave the triggering tag as a lightweight ref,
+          # so re-fetch the annotated object to read it. If the tag has no
+          # message, CHANGELOG is empty and we fall back to just the install
+          # instructions.
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}" 2>/dev/null || true
+          CHANGELOG="$(git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents)')"
+          CHANGELOG_BLOCK=""
+          if [ -n "$CHANGELOG" ]; then
+            CHANGELOG_BLOCK="${CHANGELOG}
+
+          ---
+          "
+          fi
+
           NOTES="$(cat <<EOF
-          Universal build (Apple Silicon + Intel) of Bandwatch. Requires macOS 15 (Sequoia) or newer.
+          ${CHANGELOG_BLOCK}Universal build (Apple Silicon + Intel) of Bandwatch. Requires macOS 15 (Sequoia) or newer.
 
           ## Install
           1. Download \`Bandwatch-${VERSION}-universal.zip\` below, unzip it, and move \`Bandwatch.app\` to \`/Applications\`.
