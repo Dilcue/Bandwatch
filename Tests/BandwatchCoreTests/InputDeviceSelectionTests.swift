@@ -197,15 +197,15 @@ private func tempRoot() -> URL {
     s.stop()
 }
 
-@MainActor @Test func testSystemDefaultDisconnectDoesNotPause() async {
+@MainActor @Test func testNoChosenDeviceSessionDoesNotPauseOnDisconnect() async {
     let enumr = MutableEnumerator(devices: [board], defaultUID: "board-uid")
     let s = MonitoringSession(deviceEnumerator: enumr, defaults: freshDefaults())
-    #expect(s.selectedInputDeviceUID == nil)             // System Default
+    #expect(s.selectedInputDeviceUID == nil)             // no device has been chosen (persistedInputUID == nil)
     await s.startRecordingForTesting(root: tempRoot())
 
-    enumr.simulateChange(newDevices: [])                 // default device vanishes
+    enumr.simulateChange(newDevices: [])                 // device list changes
 
-    #expect(s.captureConnection == .connected)           // follows the OS; no pause
+    #expect(s.captureConnection == .connected)           // no pinned device to lose; device-list change yields .refreshOnly
     #expect(s.isRunning)
     s.stop()
 }
