@@ -33,7 +33,7 @@ struct MonitorView: View {
             HStack(alignment: .top, spacing: 16) {
                 VStack(alignment: .leading, spacing: 10) {
                     StartStopButton(session: session)
-                    ScheduleRow(scheduler: scheduler)
+                    ScheduleRow(scheduler: scheduler, session: session)
                 }
                 .frame(width: 340, alignment: .leading)
 
@@ -62,7 +62,9 @@ struct MonitorView: View {
 
 /// The Start/Stop button — the top item of the top-right control column,
 /// directly above the schedule. Reads `session.isRunning` (observed) for its
-/// label and action.
+/// label and action. Disabled while stopped with no usable input device
+/// selected (nothing to capture from), so Start can't be pressed into a
+/// no-op; Stop is never disabled.
 private struct StartStopButton: View {
     let session: MonitoringSession
     var body: some View {
@@ -73,6 +75,8 @@ private struct StartStopButton: View {
                 Task { await session.start() }
             }
         }
+        .disabled(!session.isRunning && !session.hasUsableSelectedDevice())
+        .help("Choose an input device first.")
     }
 }
 
@@ -97,6 +101,16 @@ private struct StatusSection: View {
                 deviceDisconnectBanner(name)
             } else if showingNoSignal {
                 noSignalBanner
+            }
+
+            // Armed-idle: the schedule is enabled, nothing is currently
+            // running, and the selected device has gone missing (see
+            // `MonitoringScheduler.updateArmedIdleDeviceWatch`). Mutually
+            // exclusive with `awaitingReconnectName` above -- that one only
+            // applies while `session.isRunning`, this flag only while it
+            // isn't -- so the two banners never double up.
+            if session.armedDeviceMissing {
+                armedDeviceMissingBanner
             }
         }
     }
@@ -153,6 +167,25 @@ private struct StatusSection: View {
 
     private func deviceDisconnectBanner(_ name: String) -> some View {
         Text("Input “\(name)” was disconnected. Monitoring is paused and this interval is logged as a coverage gap. It will resume automatically when “\(name)” is reconnected.")
+            .font(.callout)
+            .fixedSize(horizontal: false, vertical: true)
+            .foregroundStyle(scheme == .dark ? .black : .white)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Palette.warning(scheme).opacity(0.85))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    /// Named when the scheduler knows what was selected (the normal case);
+    /// falls back to unnamed copy only if nothing is available to name.
+    private var armedDeviceMissingBanner: some View {
+        let text: String
+        if let name = session.selectedDeviceDisplayName() {
+            text = "Scheduled input “\(name)” is unavailable — reconnect before the next window."
+        } else {
+            text = "Scheduled input is unavailable — reconnect before the next window."
+        }
+        return Text(text)
             .font(.callout)
             .fixedSize(horizontal: false, vertical: true)
             .foregroundStyle(scheme == .dark ? .black : .white)
@@ -325,14 +358,25 @@ private struct PreferencesSection: View {
 
 /// Automatic start/stop window, independent of manual Start/Stop. Only
 /// re-renders when `schedule` changes (toggle flips, time drags), never on
-/// analysis frames.
+/// analysis frames. Also holds `session` (read-only) solely to check
+/// `hasUsableSelectedDevice()` when the toggle is switched on -- enabling a
+/// schedule with no usable device armed would otherwise fail silently every
+/// night until someone happened to notice.
 private struct ScheduleRow: View {
     @Bindable var scheduler: MonitoringScheduler
+    let session: MonitoringSession
     @Environment(\.colorScheme) private var scheme
+    @State private var showingDevicePrompt = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Toggle("Automatic schedule", isOn: $scheduler.schedule.isEnabled)
+                .onChange(of: scheduler.schedule.isEnabled) { wasEnabled, isEnabled in
+                    // Only the OFF -> ON transition is of interest; disabling
+                    // never needs the prompt.
+                    guard isEnabled, !wasEnabled, !session.hasUsableSelectedDevice() else { return }
+                    showingDevicePrompt = true
+                }
 
             // The pickers and notes ALWAYS occupy their space — invisible and
             // non-interactive until the schedule is enabled — so the column is
@@ -360,6 +404,12 @@ private struct ScheduleRow: View {
             .opacity(scheduler.schedule.isEnabled ? 1 : 0)
             .disabled(!scheduler.schedule.isEnabled)
             .accessibilityHidden(!scheduler.schedule.isEnabled)
+        }
+        // Directs the user to the Input picker rather than embedding a
+        // second device list here -- there is exactly one place devices are
+        // chosen, and this alert should not become a second one.
+        .alert("Choose an available input device for scheduled monitoring", isPresented: $showingDevicePrompt) {
+            Button("OK") { }
         }
     }
 
@@ -409,8 +459,11 @@ private struct ReadoutSection: View {
     }
 }
 
-/// Chooses which input device to monitor. Defaults to "System Default" (follows
-/// the OS). Disabled while monitoring — change the input while stopped.
+/// Chooses which input device to monitor. There is no "System Default"
+/// option — the spec requires an explicit choice, since a silent OS-level
+/// swap of the actual capture device is exactly the ambiguity this feature
+/// removes. Shows a placeholder until a device is chosen; disabled while
+/// monitoring — change the input while stopped.
 private struct InputDeviceRow: View {
     @Bindable var session: MonitoringSession
     @Environment(\.colorScheme) private var scheme
@@ -423,7 +476,14 @@ private struct InputDeviceRow: View {
                     .foregroundStyle(Palette.mutedInk(scheme))
                     .frame(width: 72, alignment: .leading)
                 Picker("Input", selection: $session.selectedInputDeviceUID) {
-                    Text("System Default").tag(String?.none)
+                    // Placeholder only -- shown solely so the menu isn't
+                    // blank when nothing is chosen yet; it drops out of the
+                    // list the moment a real device is selected, so it is
+                    // never a standing "no device" choice a user can return
+                    // to (unlike the old "System Default" row).
+                    if session.selectedInputDeviceUID == nil {
+                        Text("Select input device…").tag(String?.none)
+                    }
                     ForEach(session.availableInputDevices) { device in
                         Text(device.name).tag(String?.some(device.uid))
                     }
