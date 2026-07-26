@@ -266,6 +266,39 @@ private func freshDefaults() -> (defaults: UserDefaults, cleanup: () -> Void) {
     #expect(n.posts[1].id != n.posts[0].id)
 }
 
+/// The user picking a DIFFERENT, now-available device from the picker must
+/// also clear the armed-idle banner immediately, exactly like a hardware
+/// reconnect of the SAME device does above -- both route through the same
+/// `deviceAvailabilityChanged()` hook (`MonitoringSession.selectedInputDeviceUID`'s
+/// user-pick path now fires it directly; a hardware topology change fires it
+/// via `handleDeviceChange()`). `FakeSession` can't tell "device came back"
+/// apart from "user selected a different available device" -- both just
+/// report `hasUsableSelectedDevice() == true` -- so this starts from
+/// `armedDeviceMissing` already true (the OLD device missing) and flips to a
+/// usable device + new name, mirroring what the fixed session reports right
+/// before calling `onDeviceAvailabilityChange()`.
+@MainActor @Test func testUserSelectingAvailableDeviceClearsArmedIdleBanner() {
+    let f = FakeSession()
+    let (d, cleanupDefaults) = freshDefaults()
+    defer { cleanupDefaults() }
+    MonitoringSchedule(isEnabled: true, startMinuteOfDay: 6*60, endMinuteOfDay: 18*60).save(to: d)
+    let sch = MonitoringScheduler(session: f, defaults: d, now: { at(0, 0) })
+
+    // Schedule armed + idle, the previously-selected device missing.
+    f.usableDevice = false
+    sch.deviceAvailabilityChanged()
+    #expect(f.armedDeviceMissing)
+
+    // User picks a DIFFERENT, available device from the picker (the picker
+    // only ever lists available devices, so it reports usable by
+    // construction).
+    f.usableDevice = true
+    f.deviceName = "Scarlett Solo USB"
+    sch.deviceAvailabilityChanged()
+
+    #expect(!f.armedDeviceMissing)
+}
+
 /// While a scheduler-owned session IS running, the armed-idle watch must
 /// stay quiet even if `hasUsableSelectedDevice()` would say false -- that
 /// case is a mid-session disconnect, handled entirely by

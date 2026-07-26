@@ -462,11 +462,26 @@ public final class MonitoringSession {
                 } else {
                     defaults.removeObject(forKey: Self.inputDeviceNameDefaultsKey)
                 }
+                // A user pick is, by definition, a device the picker just listed
+                // as available -- it always resolves any prior "unavailable"
+                // notice, even one left over from a DIFFERENT device that has
+                // since gone missing. `resolveInputSelection` is the only other
+                // writer of `inputNotice`, and it never runs on this path.
+                inputNotice = nil
             } else {
                 defaults.removeObject(forKey: Self.inputDeviceDefaultsKey)
                 persistedInputDeviceName = nil
                 defaults.removeObject(forKey: Self.inputDeviceNameDefaultsKey)
             }
+            // Let the scheduler's armed-idle watch re-evaluate against the new
+            // selection immediately (mirrors the call at the end of
+            // `handleDeviceChange()`) -- otherwise picking a now-available
+            // device while armed+idle leaves `armedDeviceMissing` (and its
+            // banner) stuck true until the next 30s tick. Synchronous and
+            // one-way: the scheduler only reads `hasUsableSelectedDevice()` /
+            // `selectedDeviceDisplayName()` and writes `armedDeviceMissing`,
+            // never `selectedInputDeviceUID`, so this cannot recurse.
+            onDeviceAvailabilityChange?()
         }
     }
     /// Current input devices, for the picker. Refresh with `refreshInputDevices()`.

@@ -174,6 +174,47 @@ private final class MutableEnumerator: InputDeviceEnumerating, @unchecked Sendab
     #expect(s.inputNotice == nil)
 }
 
+/// Hardware-verification regression: the user's chosen device (board, "USB
+/// Audio CODEC") goes missing, leaving a stale `inputNotice` naming it. The
+/// user then picks a DIFFERENT, available device (mic) from the picker.
+/// `resolveInputSelection` -- the notice's only other writer -- never runs on
+/// this user-pick path, so before the fix the notice about the OLD device
+/// persisted even though the picker only ever lists available devices (a
+/// user pick, by construction, resolves any "unavailable" condition).
+@MainActor @Test func testSelectingDifferentDeviceClearsStaleInputNotice() {
+    let defaults = freshDefaults()
+    defaults.set("board-uid", forKey: MonitoringSession.inputDeviceDefaultsKey)
+    defaults.set("USB Audio CODEC", forKey: MonitoringSession.inputDeviceNameDefaultsKey)
+    let enumr = MutableEnumerator(devices: [], defaultUID: nil)   // board unplugged at launch
+    let s = MonitoringSession(deviceEnumerator: enumr, defaults: defaults)
+    #expect(s.inputNotice == "Selected input 'USB Audio CODEC' is unavailable — reconnect it or choose another.")
+
+    enumr.devices = [mic]            // a different device (mic) shows up
+    s.refreshInputDevices()
+    #expect(s.inputNotice != nil)    // board is still absent -- notice persists
+
+    s.selectedInputDeviceUID = "mic-uid"   // user picks the available mic instead
+    #expect(s.inputNotice == nil)
+}
+
+/// The scheduler's armed-idle watch only re-evaluates when
+/// `onDeviceAvailabilityChange` fires -- wired to a hardware topology change
+/// via `handleDeviceChange()`, but never fired by a user picking a new
+/// device from the picker before this fix. Without it, `armedDeviceMissing`
+/// (and its banner) stays stuck true until the next 30s tick even after the
+/// user resolves the problem by hand.
+@MainActor @Test func testSelectingDeviceFiresAvailabilityChangeHook() {
+    let defaults = freshDefaults()
+    let enumr = FakeEnumerator(devices: [board, mic], defaultUID: "board-uid")
+    let s = MonitoringSession(deviceEnumerator: enumr, defaults: defaults)
+    var fired = false
+    s.onDeviceAvailabilityChange = { fired = true }
+
+    s.selectedInputDeviceUID = "mic-uid"
+
+    #expect(fired)
+}
+
 private func tempRoot() -> URL {
     let d = FileManager.default.temporaryDirectory
         .appendingPathComponent("bw-\(UUID().uuidString)")
