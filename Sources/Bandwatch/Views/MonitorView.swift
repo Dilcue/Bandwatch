@@ -76,7 +76,7 @@ private struct StartStopButton: View {
             }
         }
         .disabled(!session.isRunning && !session.hasUsableSelectedDevice())
-        .help("Choose an input device first.")
+        .help(session.isRunning || session.hasUsableSelectedDevice() ? "" : "Choose an input device first.")
     }
 }
 
@@ -97,19 +97,22 @@ private struct StatusSection: View {
                 errorBanner(error)
             }
 
+            // Awaiting-reconnect, no-signal, and armed-idle are chained into a
+            // single if/else-if so at most one ever renders. They are NOT
+            // mutually exclusive by construction: a scheduled start on an
+            // already-missing device can leave `armedDeviceMissing == true`
+            // for up to one tick while `captureConnection` has already
+            // flipped to `.awaitingReconnect`, so without this chaining both
+            // banners could render together with contradictory messaging.
+            // Order below is most-specific/active state first: an active
+            // disconnect during a running session, then no-signal during a
+            // running session, then armed-idle while stopped (see
+            // `MonitoringScheduler.updateArmedIdleDeviceWatch`).
             if let name = awaitingReconnectName {
                 deviceDisconnectBanner(name)
             } else if showingNoSignal {
                 noSignalBanner
-            }
-
-            // Armed-idle: the schedule is enabled, nothing is currently
-            // running, and the selected device has gone missing (see
-            // `MonitoringScheduler.updateArmedIdleDeviceWatch`). Mutually
-            // exclusive with `awaitingReconnectName` above -- that one only
-            // applies while `session.isRunning`, this flag only while it
-            // isn't -- so the two banners never double up.
-            if session.armedDeviceMissing {
+            } else if session.armedDeviceMissing {
                 armedDeviceMissingBanner
             }
         }
