@@ -167,6 +167,41 @@ private func freshDefaults() -> (defaults: UserDefaults, cleanup: () -> Void) {
     #expect(f.isMonitoring)                // still running
 }
 
+/// Unchecking Automatic Schedule must stop a session the SCHEDULER ITSELF
+/// started (owned), since disabling the automation should turn off what it
+/// turned on -- mirrors the falling-edge and times-changed-edit stop paths
+/// above, but triggered by `isEnabled` flipping to false instead.
+@MainActor @Test func testDisablingScheduleStopsSchedulerOwnedSession() {
+    let f = FakeSession()
+    let (d, cleanupDefaults) = freshDefaults()
+    defer { cleanupDefaults() }
+    MonitoringSchedule(isEnabled: true, startMinuteOfDay: 6*60, endMinuteOfDay: 18*60).save(to: d)
+    let sch = MonitoringScheduler(session: f, defaults: d, now: { at(10, 0) })
+    #expect(f.isMonitoring)              // catch-up start, mid-window, scheduler-owned
+    #expect(f.isScheduleOwned)
+
+    sch.schedule.isEnabled = false
+    #expect(f.stopCount == 1)
+    #expect(!f.isMonitoring)
+}
+
+/// Same disable, but the running session was started manually (not
+/// scheduler-owned): the non-fighting rule holds here too -- the schedule
+/// only ever stops what it started, so a manual session must be left running.
+@MainActor @Test func testDisablingScheduleLeavesManualSessionRunning() {
+    let f = FakeSession()
+    let (d, cleanupDefaults) = freshDefaults()
+    defer { cleanupDefaults() }
+    MonitoringSchedule(isEnabled: true, startMinuteOfDay: 6*60, endMinuteOfDay: 18*60).save(to: d)
+    let sch = MonitoringScheduler(session: f, defaults: d, now: { at(0, 0) })
+    // A manual session is running while the schedule is (separately) enabled.
+    f.isMonitoring = true; f.isScheduleOwned = false
+
+    sch.schedule.isEnabled = false
+    #expect(f.stopCount == 0)
+    #expect(f.isMonitoring)
+}
+
 // MARK: - Task 4: notification authorization on enable
 
 @MainActor @Test func testEnablingScheduleRequestsNotificationAuthorization() async {

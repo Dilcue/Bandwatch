@@ -209,6 +209,12 @@ import Observation
     }
 
     private func deactivate() {
+        // Unchecking the schedule turns off the automation — so stop a session
+        // the scheduler itself started. A session the user started manually is
+        // left running (non-fighting): the schedule only ever stops what it started.
+        if session.isMonitoring && session.isScheduleOwned {
+            session.stopScheduled()
+        }
         tickTask?.cancel(); tickTask = nil
         lastInWindow = nil
         releaseKeepAwake()
@@ -216,7 +222,6 @@ import Observation
         // banner/dedupe state left over from before disabling.
         session.armedDeviceMissing = false
         armedIdleDeviceMissingPosted = false
-        // Deliberately does NOT stop an in-progress session — see spec.
     }
 
     private func acquireKeepAwake() {

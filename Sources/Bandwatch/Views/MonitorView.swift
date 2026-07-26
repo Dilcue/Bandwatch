@@ -373,7 +373,7 @@ private struct ScheduleRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Toggle("Automatic schedule", isOn: $scheduler.schedule.isEnabled)
+            Toggle("Automatic Schedule", isOn: $scheduler.schedule.isEnabled)
                 .onChange(of: scheduler.schedule.isEnabled) { wasEnabled, isEnabled in
                     // Only the OFF -> ON transition is of interest; disabling
                     // never needs the prompt.
