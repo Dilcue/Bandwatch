@@ -59,11 +59,24 @@ import Observation
     /// Dedupe for the armed-idle "device missing" notification: true once it
     /// has been posted for the CURRENT missing episode, reset back to false
     /// as soon as the device is usable again (or the schedule is no longer
-    /// armed-idle) so a later episode alerts again. The real `UserNotifying`
-    /// conformer (`SystemUserNotifier`) additionally dedupes by `id` for the
-    /// life of the process -- this flag only governs repeat posts WITHIN one
-    /// episode, e.g. across successive ticks.
+    /// armed-idle) so a later episode alerts again. This flag only governs
+    /// repeat posts WITHIN one episode, e.g. across successive ticks -- see
+    /// `armedIdleDeviceMissingEpisode` below for how a later episode still
+    /// gets a real notification out of the production notifier.
     @ObservationIgnored private var armedIdleDeviceMissingPosted = false
+    /// Monotonic counter, incremented each time a NEW armed-idle episode
+    /// actually posts (i.e. right alongside `armedIdleDeviceMissingPosted`
+    /// flipping true). Folded into the notification `id` so each episode's
+    /// post gets a distinct id. This matters because the real `UserNotifying`
+    /// conformer (`SystemUserNotifier`) dedupes by `id` for the *life of the
+    /// process*, never clearing it -- if every episode reused the same
+    /// stable id, only the very first disappear-episode of the app's
+    /// lifetime would ever actually alert the user, and every later
+    /// disappear -> reconnect -> disappear cycle would silently post
+    /// nothing even though `armedDeviceMissing` re-arms correctly. Varying
+    /// the id per episode makes each genuinely new episode land as a fresh
+    /// post against that permanent dedupe set.
+    @ObservationIgnored private var armedIdleDeviceMissingEpisode = 0
     // Safe unsafe: only ever read/written on MainActor while `self` is alive; by the time
     // `deinit` runs (which also touches it off-actor-checked), no other reference to this
     // instance exists, so there is no concurrent MainActor access to race with.
@@ -132,10 +145,14 @@ import Observation
     /// running, a selected device going missing is a silent failure nobody
     /// would notice until the next window comes and goes empty-handed. This
     /// surfaces it right away: a banner flag on the session (`armedDeviceMissing`)
-    /// plus one deduped notification per missing episode. Deliberately
-    /// distinct from the blocked-start path (`MonitoringSession.start(bySchedule:)`),
-    /// which only fires AT a scheduled start attempt -- this fires the moment
-    /// the device disappears, whether or not a window is imminent.
+    /// plus one notification per missing episode -- deduped within an episode
+    /// by `armedIdleDeviceMissingPosted`, and posted under a fresh,
+    /// per-episode `id` (see `armedIdleDeviceMissingEpisode`) so a later
+    /// episode still gets through the production notifier's permanent
+    /// per-id dedupe. Deliberately distinct from the blocked-start path
+    /// (`MonitoringSession.start(bySchedule:)`), which only fires AT a
+    /// scheduled start attempt -- this fires the moment the device
+    /// disappears, whether or not a window is imminent.
     private func updateArmedIdleDeviceWatch() {
         guard schedule.isEnabled, !session.isMonitoring else {
             session.armedDeviceMissing = false
@@ -153,13 +170,16 @@ import Observation
         session.armedDeviceMissing = true
         guard !armedIdleDeviceMissingPosted else { return }
         armedIdleDeviceMissingPosted = true
+        armedIdleDeviceMissingEpisode += 1
         notifier?.post(title: Self.armedIdleDeviceMissingTitle,
                         body: "Scheduled input '\(name)' is unavailable — reconnect before the next window.",
-                        id: Self.armedIdleDeviceMissingID)
+                        id: "\(Self.armedIdleDeviceMissingIDPrefix).\(armedIdleDeviceMissingEpisode)")
     }
 
     private static let armedIdleDeviceMissingTitle = "Bandwatch: Input Device Unavailable"
-    private static let armedIdleDeviceMissingID = "armed-idle.device-missing"
+    /// Prefix for the armed-idle notification id; the actual id posted also
+    /// includes the per-episode counter -- see `armedIdleDeviceMissingEpisode`.
+    private static let armedIdleDeviceMissingIDPrefix = "armed-idle.device-missing"
 
     private func activate() {
         // Enabling the schedule (or launching with it already enabled) is the

@@ -20,12 +20,21 @@ import Foundation
 
 /// Stands in for `SystemUserNotifier` in scheduler tests -- mirrors the fake
 /// in `UserNotifyingTests.swift` (kept separate/private to each file rather
-/// than shared, to keep each test file self-contained).
+/// than shared, to keep each test file self-contained). Also mirrors
+/// `SystemUserNotifier`'s permanent, never-cleared per-`id` dedupe (a `post`
+/// call whose `id` was already delivered is silently dropped): this is what
+/// makes `testArmedIdleDeviceMissingPostsOnceAndClearsOnReturn` a real guard
+/// against `MonitoringScheduler` reusing one stable id across episodes --
+/// with a naive fake that just appended every call, a regression back to a
+/// stable id would go undetected here even though it would silently swallow
+/// every notification after the first in production.
 @MainActor private final class FakeNotifier: UserNotifying {
     private(set) var posts: [(title: String, body: String, id: String)] = []
     private(set) var authorizationRequestCount = 0
+    private var postedIDs: Set<String> = []
     func requestAuthorization() async { authorizationRequestCount += 1 }
     func post(title: String, body: String, id: String) {
+        guard postedIDs.insert(id).inserted else { return }
         posts.append((title: title, body: body, id: id))
     }
 }
@@ -202,6 +211,16 @@ private func freshDefaults() -> (defaults: UserDefaults, cleanup: () -> Void) {
 /// changes are wired to -- see `MonitoringSession.onDeviceAvailabilityChange`).
 /// Repeated ticks/changes while still missing must not pile up duplicate
 /// posts; the device returning clears the banner (and re-arms the dedupe).
+///
+/// Also guards against a real production bug: `SystemUserNotifier` dedupes
+/// posted `id`s for the life of the process and never clears them, so if the
+/// scheduler reused one stable id across episodes, only the FIRST
+/// disappear-episode of the app's lifetime would ever actually notify the
+/// user -- every later disappear -> reconnect -> disappear cycle would
+/// re-arm the in-app banner but silently post nothing. `FakeNotifier` here
+/// mirrors that permanent per-id dedupe, so this test would fail against
+/// that stable-id behavior: the second episode's assertions below require
+/// both a second delivered post AND a distinct id from the first.
 @MainActor @Test func testArmedIdleDeviceMissingPostsOnceAndClearsOnReturn() {
     let f = FakeSession()
     let n = FakeNotifier()
@@ -219,7 +238,7 @@ private func freshDefaults() -> (defaults: UserDefaults, cleanup: () -> Void) {
     sch.deviceAvailabilityChanged()
     #expect(f.armedDeviceMissing)
     #expect(n.posts.count == 1)
-    #expect(n.posts[0].id == "armed-idle.device-missing")
+    #expect(n.posts[0].id == "armed-idle.device-missing.1")
     #expect(n.posts[0].body == "Scheduled input 'Scarlett 2i2' is unavailable — reconnect before the next window.")
 
     // Repeated signals while still missing (ticks, redundant device-change
@@ -235,14 +254,16 @@ private func freshDefaults() -> (defaults: UserDefaults, cleanup: () -> Void) {
     #expect(!f.armedDeviceMissing)
     #expect(n.posts.count == 1)               // no new post just for recovering
 
-    // Missing again -- a genuinely NEW episode alerts again (not permanently
-    // suppressed by the first post). Real-world double delivery is still
-    // prevented by `SystemUserNotifier`'s own per-id dedupe, which this fake
-    // deliberately does not replicate.
+    // Missing again -- a genuinely NEW episode must alert again, i.e. must
+    // be DELIVERED (not just re-arm the banner) even against a notifier that
+    // permanently dedupes by id for the process lifetime. That requires this
+    // second episode's post to carry an id distinct from the first.
     f.usableDevice = false
     sch.deviceAvailabilityChanged()
     #expect(f.armedDeviceMissing)
     #expect(n.posts.count == 2)
+    #expect(n.posts[1].id == "armed-idle.device-missing.2")
+    #expect(n.posts[1].id != n.posts[0].id)
 }
 
 /// While a scheduler-owned session IS running, the armed-idle watch must
