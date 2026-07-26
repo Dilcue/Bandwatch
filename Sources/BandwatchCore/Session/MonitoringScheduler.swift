@@ -9,6 +9,10 @@ import Observation
     var isScheduleOwned: Bool { get }
     func startScheduled()
     func stopScheduled()
+    /// Prompt for microphone access now, while the user is present, so an
+    /// unattended scheduled start later doesn't hit an undetermined-permission
+    /// prompt (or silently fail). No-op if access is already decided.
+    func requestMicrophonePermissionForSchedule()
 }
 
 @MainActor @Observable public final class MonitoringScheduler {
@@ -67,6 +71,10 @@ import Observation
     }
 
     private func activate() {
+        // Enabling the schedule (or launching with it already enabled) is the
+        // moment to secure mic access — the user is here to answer the prompt,
+        // rather than the scheduled window hitting it unattended at, say, 6 AM.
+        session.requestMicrophonePermissionForSchedule()
         acquireKeepAwake()
         // Seed from current owned-running state (not nil) so that if the newly-enabled
         // window excludes "now" while we own a running session, the falling-edge branch

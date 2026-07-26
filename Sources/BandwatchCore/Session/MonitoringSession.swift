@@ -1594,4 +1594,13 @@ extension MonitoringSession: SchedulableSession {
     // Task. Ordering is fine — the scheduler only starts when nothing is running.
     public func startScheduled() { Task { await start(bySchedule: true) } }
     public func stopScheduled() { stop() }
+
+    // Only request when the status is still undetermined: that's the one case
+    // that shows the macOS prompt. `.granted` needs nothing; `.denied` won't
+    // re-prompt anyway (start() surfaces `.permissionDenied` if it stays that
+    // way), so there's nothing useful to do here for it.
+    public func requestMicrophonePermissionForSchedule() {
+        guard AudioCaptureEngine.currentPermission() == .undetermined else { return }
+        Task { _ = await AudioCaptureEngine.requestPermission() }
+    }
 }

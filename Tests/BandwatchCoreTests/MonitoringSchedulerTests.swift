@@ -6,8 +6,10 @@ import Foundation
     var isMonitoring = false
     var isScheduleOwned = false
     var startCount = 0, stopCount = 0
+    var permissionRequestCount = 0
     func startScheduled() { startCount += 1; isMonitoring = true; isScheduleOwned = true }
     func stopScheduled() { stopCount += 1; isMonitoring = false; isScheduleOwned = false }
+    func requestMicrophonePermissionForSchedule() { permissionRequestCount += 1 }
 }
 private func at(_ h: Int, _ m: Int) -> Date {   // today at h:m local
     Calendar.current.date(bySettingHour: h, minute: m, second: 0, of: Date())!
@@ -73,6 +75,29 @@ private func freshDefaults() -> (defaults: UserDefaults, cleanup: () -> Void) {
     MonitoringSchedule(isEnabled: false, startMinuteOfDay: 6*60, endMinuteOfDay: 18*60).save(to: d)
     let sch = MonitoringScheduler(session: f, defaults: d, now: { at(0, 0) })
     sch.evaluate(now: at(12, 0)); #expect(f.startCount == 0)
+}
+
+@MainActor @Test func testEnablingScheduleRequestsMicrophonePermission() {
+    let f = FakeSession()
+    let (d, cleanupDefaults) = freshDefaults()
+    defer { cleanupDefaults() }
+    // Start disabled: nothing requested at init.
+    MonitoringSchedule(isEnabled: false, startMinuteOfDay: 6*60, endMinuteOfDay: 18*60).save(to: d)
+    let sch = MonitoringScheduler(session: f, defaults: d, now: { at(0, 0) })
+    #expect(f.permissionRequestCount == 0)
+    // Checking the box activates the schedule and secures mic access up front.
+    sch.schedule.isEnabled = true
+    #expect(f.permissionRequestCount == 1)
+}
+
+@MainActor @Test func testLaunchWithScheduleEnabledRequestsMicrophonePermission() {
+    let f = FakeSession()
+    let (d, cleanupDefaults) = freshDefaults()
+    defer { cleanupDefaults() }
+    MonitoringSchedule(isEnabled: true, startMinuteOfDay: 6*60, endMinuteOfDay: 18*60).save(to: d)
+    let sch = MonitoringScheduler(session: f, defaults: d, now: { at(0, 0) })
+    _ = sch                            // activate() at init requests too
+    #expect(f.permissionRequestCount == 1)
 }
 
 /// Regression test: editing the schedule's times so the window no longer
