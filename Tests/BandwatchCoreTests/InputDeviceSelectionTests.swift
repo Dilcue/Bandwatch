@@ -26,34 +26,47 @@ private let board = AudioInputDevice(uid: "board-uid", name: "USB Audio CODEC")
     #expect(s.availableInputDevices == [board, mic])
 }
 
-@MainActor @Test func testSavedDeviceAbsentFallsBackToDefaultWithNotice() {
+@MainActor @Test func testSavedDeviceAbsentHasNoUsableSelectionAndNamesItInTheNotice() {
     let defaults = freshDefaults()
     defaults.set("mic-uid", forKey: MonitoringSession.inputDeviceDefaultsKey)   // lav mic saved…
+    defaults.set("Saved Mic", forKey: MonitoringSession.inputDeviceNameDefaultsKey)
     let enumr = FakeEnumerator(devices: [board], defaultUID: "board-uid")       // …but unplugged
     let s = MonitoringSession(deviceEnumerator: enumr, defaults: defaults)
-    #expect(s.selectedInputDeviceUID == nil)                       // fell back to System Default
-    #expect(s.inputNotice != nil)                                  // and said so
+    #expect(s.selectedInputDeviceUID == nil)                       // no usable device — NOT a fallback
+    #expect(s.inputNotice == "Selected input 'Saved Mic' is unavailable — reconnect it or choose another.")
+    #expect(s.hasUsableSelectedDevice() == false)
     // Preference is NOT cleared, so it re-selects when the device returns.
     #expect(defaults.string(forKey: MonitoringSession.inputDeviceDefaultsKey) == "mic-uid")
 }
 
-@MainActor @Test func testNoSavedDeviceDefaultsToSystemDefault() {
+@MainActor @Test func testNoSavedDeviceMeansNoneChosen() {
     let enumr = FakeEnumerator(devices: [board], defaultUID: "board-uid")
     let s = MonitoringSession(deviceEnumerator: enumr, defaults: freshDefaults())
     #expect(s.selectedInputDeviceUID == nil)
     #expect(s.inputNotice == nil)
+    #expect(s.hasUsableSelectedDevice() == false)
 }
 
-@MainActor @Test func testSelectingADevicePersistsAndClearing() {
+@MainActor @Test func testSavedDevicePresentIsUsable() {
+    let defaults = freshDefaults()
+    defaults.set("mic-uid", forKey: MonitoringSession.inputDeviceDefaultsKey)
+    let enumr = FakeEnumerator(devices: [board, mic], defaultUID: "board-uid")
+    let s = MonitoringSession(deviceEnumerator: enumr, defaults: defaults)
+    #expect(s.hasUsableSelectedDevice() == true)
+}
+
+@MainActor @Test func testSelectingADevicePersistsUIDAndNameAndClearing() {
     let defaults = freshDefaults()
     let enumr = FakeEnumerator(devices: [board, mic], defaultUID: "board-uid")
     let s = MonitoringSession(deviceEnumerator: enumr, defaults: defaults)
 
     s.selectedInputDeviceUID = "mic-uid"
     #expect(defaults.string(forKey: MonitoringSession.inputDeviceDefaultsKey) == "mic-uid")
+    #expect(defaults.string(forKey: MonitoringSession.inputDeviceNameDefaultsKey) == "USB Lavalier")
 
-    s.selectedInputDeviceUID = nil                                 // back to System Default
+    s.selectedInputDeviceUID = nil                                 // cleared — none chosen
     #expect(defaults.string(forKey: MonitoringSession.inputDeviceDefaultsKey) == nil)
+    #expect(defaults.string(forKey: MonitoringSession.inputDeviceNameDefaultsKey) == nil)
 }
 
 @MainActor @Test func testRecordingDeviceUIDIsSelectedWhenPresent() {
@@ -64,18 +77,24 @@ private let board = AudioInputDevice(uid: "board-uid", name: "USB Audio CODEC")
     #expect(s.recordingDeviceUID() == "mic-uid")
 }
 
-@MainActor @Test func testRecordingDeviceUIDIsSystemDefaultWhenFollowingOS() {
+@MainActor @Test func testRecordingDeviceUIDNeverFallsBackToSystemDefaultWhenNoneChosen() {
     let enumr = FakeEnumerator(devices: [board], defaultUID: "board-uid")
     let s = MonitoringSession(deviceEnumerator: enumr, defaults: freshDefaults())
     #expect(s.selectedInputDeviceUID == nil)
-    #expect(s.recordingDeviceUID() == "board-uid")                 // the OS default's UID
+    // No device ever chosen and no pinned preference — the documented placeholder,
+    // never `systemDefaultUID()` ("board-uid").
+    #expect(s.recordingDeviceUID() == "unknown")
 }
 
-@MainActor @Test func testRecordingDeviceUIDFallsToDefaultIfSelectedVanishes() {
-    let enumr = FakeEnumerator(devices: [board], defaultUID: "board-uid")
-    let s = MonitoringSession(deviceEnumerator: enumr, defaults: freshDefaults())
-    s.selectedInputDeviceUID = "ghost-uid"                         // selected, but not present
-    #expect(s.recordingDeviceUID() == "board-uid")                // records what actually captures
+@MainActor @Test func testRecordingDeviceUIDPinsToPreferenceIfSelectedVanishesRatherThanSystemDefault() {
+    let defaults = freshDefaults()
+    defaults.set("mic-uid", forKey: MonitoringSession.inputDeviceDefaultsKey)
+    let enumr = FakeEnumerator(devices: [board], defaultUID: "board-uid")      // mic absent
+    let s = MonitoringSession(deviceEnumerator: enumr, defaults: defaults)
+    #expect(s.selectedInputDeviceUID == nil)                       // no usable device
+    // Must never return the enumerator's system-default UID ("board-uid") — it
+    // falls back to the pinned preference instead.
+    #expect(s.recordingDeviceUID() == "mic-uid")
 }
 
 private final class MutableEnumerator: InputDeviceEnumerating, @unchecked Sendable {

@@ -415,11 +415,14 @@ public final class MonitoringSession {
 
     // MARK: Input device selection
 
-    /// The *effective* chosen input device UID, or nil to follow the system
-    /// default. Bound to the picker. Setting it from the UI persists the choice;
-    /// internal re-resolution (`resolveInputSelection`) does not. It may
-    /// transiently fall back to nil when the preferred device isn't present yet
-    /// (e.g. not enumerated at early launch), and recover on the next refresh.
+    /// The *effective* chosen input device UID, or nil when there is no usable
+    /// device — either none has ever been chosen, or the chosen one is not
+    /// currently present. There is no "System Default" fallback: a session
+    /// always targets an explicit device, never a silent OS default. Bound to
+    /// the picker. Setting it from the UI persists the choice; internal
+    /// re-resolution (`resolveInputSelection`) does not. It may transiently
+    /// read nil when the preferred device isn't present yet (e.g. not
+    /// enumerated at early launch), and recover on the next refresh.
     public var selectedInputDeviceUID: String? {
         didSet {
             // Only user/picker changes persist and update the remembered
@@ -428,8 +431,19 @@ public final class MonitoringSession {
             persistedInputUID = selectedInputDeviceUID
             if let uid = selectedInputDeviceUID {
                 defaults.set(uid, forKey: Self.inputDeviceDefaultsKey)
+                // Remember the name too, so the unavailable notice can name the
+                // device by its last-known name while it's absent.
+                let name = availableInputDevices.first { $0.uid == uid }?.name
+                persistedInputDeviceName = name
+                if let name {
+                    defaults.set(name, forKey: Self.inputDeviceNameDefaultsKey)
+                } else {
+                    defaults.removeObject(forKey: Self.inputDeviceNameDefaultsKey)
+                }
             } else {
                 defaults.removeObject(forKey: Self.inputDeviceDefaultsKey)
+                persistedInputDeviceName = nil
+                defaults.removeObject(forKey: Self.inputDeviceNameDefaultsKey)
             }
         }
     }
@@ -441,10 +455,14 @@ public final class MonitoringSession {
     @ObservationIgnored private let deviceEnumerator: InputDeviceEnumerating
     @ObservationIgnored private let defaults: UserDefaults
     /// The remembered preference (source of truth for re-resolution): the UID the
-    /// user last chose, or nil for System Default. Distinct from the *effective*
-    /// `selectedInputDeviceUID`, which can transiently differ when the preferred
-    /// device isn't currently enumerated.
+    /// user last chose, or nil when none has ever been chosen. Distinct from the
+    /// *effective* `selectedInputDeviceUID`, which can transiently differ when
+    /// the preferred device isn't currently enumerated.
     @ObservationIgnored private var persistedInputUID: String?
+    /// The remembered display name for `persistedInputUID`, captured at the
+    /// moment it was chosen. Lets the unavailable notice name the device while
+    /// it's absent (its live name can't be looked up once it's not enumerated).
+    @ObservationIgnored private var persistedInputDeviceName: String?
     @ObservationIgnored private var isResolvingInput = false
     /// Synchronous re-entrancy guard for `start(bySchedule:)`: that method awaits
     /// (permission request) before `isRunning` flips true, so two overlapping calls
@@ -453,6 +471,7 @@ public final class MonitoringSession {
     /// method body so a second concurrent MainActor call bails out immediately.
     @ObservationIgnored private var isStarting = false
     static let inputDeviceDefaultsKey = "bandwatch.selectedInputDeviceUID"
+    static let inputDeviceNameDefaultsKey = "bandwatch.selectedInputDeviceName"
     static let thresholdDefaultsKey = "bandwatch.triggerDBFS"
     /// The detector trigger threshold used until the user sets their own (which
     /// then becomes the remembered default — see `setTriggerThreshold`).
@@ -482,7 +501,9 @@ public final class MonitoringSession {
     /// passes it here first so this decision (and, on the `.pause` path,
     /// `pinnedDeviceName`'s lookup of the departing device's name in the
     /// still-stale `availableInputDevices`) sees the two lists distinctly.
-    /// Pinned-only: a nil `persistedInputUID` (System Default) never pauses.
+    /// Pinned-only: a nil `persistedInputUID` (no device ever chosen) never pauses
+    /// — there's no explicit device to lose. This is not a "System Default"
+    /// case; that option no longer exists.
     func deviceChangeAction(devices: [AudioInputDevice]) -> DeviceChangeAction {
         guard isRunning, let pinned = persistedInputUID else { return .refreshOnly }
         let present = devices.contains { $0.uid == pinned }
@@ -519,9 +540,9 @@ public final class MonitoringSession {
             availableInputDevices = fresh
             // Re-resolve the pinned selection when stopped, so a pinned device that
             // reconnects while monitoring is stopped gets re-selected (otherwise Start
-            // would silently fall back to System Default / the built-in mic). NOT while
-            // running/awaiting: resolveInputSelection() would clear selectedInputDeviceUID
-            // during awaitingReconnect and break resumeAfterReconnect's UID lookup.
+            // would have no usable device to target). NOT while running/awaiting:
+            // resolveInputSelection() would clear selectedInputDeviceUID during
+            // awaitingReconnect and break resumeAfterReconnect's UID lookup.
             if !isRunning { resolveInputSelection() }
         case .pause(let name):
             availableInputDevices = fresh
@@ -588,11 +609,15 @@ public final class MonitoringSession {
     /// Sets the effective selection from the remembered preference and the
     /// current device list, WITHOUT persisting (guarded by `isResolvingInput` so
     /// the didSet doesn't treat it as a user change and clobber the preference).
+    /// Never falls back to a system default: if the preferred device isn't
+    /// present, the effective selection is nil (no usable device) and
+    /// `inputNotice` names the absent device so the user can reconnect it or
+    /// choose another.
     private func resolveInputSelection() {
         isResolvingInput = true
         defer { isResolvingInput = false }
         guard let pref = persistedInputUID else {
-            selectedInputDeviceUID = nil            // user chose System Default
+            selectedInputDeviceUID = nil            // none chosen
             inputNotice = nil
             return
         }
@@ -600,21 +625,31 @@ public final class MonitoringSession {
             selectedInputDeviceUID = pref
             inputNotice = nil
         } else {
-            selectedInputDeviceUID = nil            // fall back for now; keep the preference
-            inputNotice = "Saved input device unavailable — using System Default."
+            selectedInputDeviceUID = nil            // NOT a fallback to default
+            let name = persistedInputDeviceName ?? pref
+            inputNotice = "Selected input '\(name)' is unavailable — reconnect it or choose another."
         }
     }
 
-    /// The device UID to stamp on recorded events: the selected device if it is
-    /// currently present, otherwise the system default, otherwise the legacy
-    /// placeholder. Derived from the enumerator so it stays honest about what
-    /// actually captured.
+    /// True when there is a usable, currently-present input device selected.
+    /// False both when nothing has ever been chosen and when the chosen device
+    /// is currently absent — callers that need to distinguish those two cases
+    /// consult `inputNotice` (non-nil only for the latter).
+    public func hasUsableSelectedDevice() -> Bool { selectedInputDeviceUID != nil }
+
+    /// The device UID to stamp on recorded events: the selected device when
+    /// present. There is no system-default fallback — capture never silently
+    /// targets an unpicked device — so when no device is currently usable this
+    /// falls back to the pinned preference (kept for evidence continuity even
+    /// while the device is absent), or the legacy placeholder if nothing has
+    /// ever been chosen. Derived from the enumerator so it stays honest about
+    /// what actually captured.
     func recordingDeviceUID() -> String {
         if let uid = selectedInputDeviceUID,
            availableInputDevices.contains(where: { $0.uid == uid }) {
             return uid
         }
-        return deviceEnumerator.systemDefaultUID() ?? "default"
+        return persistedInputUID ?? "unknown"
     }
 
     public init(sampleRate: Double = 44100, fftSize: Int = 8192, hopSize: Int = 2048,
@@ -662,10 +697,12 @@ public final class MonitoringSession {
 
         // Load the remembered preference and resolve it against the currently
         // enumerated devices. If the device list is empty/incomplete this early
-        // in launch, resolution falls back to System Default WITHOUT clearing
-        // the preference, and the picker's onAppear `refreshInputDevices()`
-        // re-resolves once the list is ready (recovering the saved device).
+        // in launch, resolution reports no usable device (nil, with a notice)
+        // WITHOUT clearing the preference, and the picker's onAppear
+        // `refreshInputDevices()` re-resolves once the list is ready (recovering
+        // the saved device).
         self.persistedInputUID = defaults.string(forKey: Self.inputDeviceDefaultsKey)
+        self.persistedInputDeviceName = defaults.string(forKey: Self.inputDeviceNameDefaultsKey)
         self.availableInputDevices = deviceEnumerator.available()
         resolveInputSelection()
 
