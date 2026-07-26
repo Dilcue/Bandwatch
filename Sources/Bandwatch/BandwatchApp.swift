@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 import BandwatchCore
 
 @main
@@ -87,7 +88,7 @@ struct BandwatchApp: App {
 /// closing the segment's writer and the database (see its doc comment) —
 /// has genuinely finished.
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     // Shared notification client (Task 4): `session` uses it for blocked
     // scheduled-start alerts, `scheduler` for the armed-idle device watch.
     // One instance so both go through the same authorization/dedupe surface.
@@ -106,6 +107,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // macOS suppresses a posted notification's banner entirely while this
+        // app is frontmost UNLESS a `UNUserNotificationCenterDelegate` is set
+        // and its `willPresent` callback opts in below -- with no delegate,
+        // every notification `SystemUserNotifier` posts while the user is
+        // looking at the app is silently dropped. Set before anything else so
+        // there's no window where a notification could be posted and lost.
+        UNUserNotificationCenter.current().delegate = self
+
         // Force the scheduler to initialize now (it's a lazy var), so its evaluation
         // timer and keep-awake start at launch regardless of whether the monitor
         // window is ever built — a previously-enabled schedule must resume on launch.
@@ -137,6 +146,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApplication.shared.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
+    }
+
+    // Without this, `UNUserNotificationCenter` shows nothing while Bandwatch
+    // is the frontmost app (see the comment in `applicationDidFinishLaunching`)
+    // -- opt in to presenting it exactly like a backgrounded app would.
+    //
+    // `nonisolated` because `UNUserNotificationCenterDelegate`'s requirement
+    // is itself nonisolated (it can fire off the main actor); the body only
+    // touches its own arguments, so no actor hop is needed to satisfy it.
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .list, .sound])
     }
 }
 
