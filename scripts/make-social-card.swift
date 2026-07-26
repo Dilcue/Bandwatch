@@ -42,41 +42,51 @@ if let sym = NSImage(systemSymbolName: "waveform", accessibilityDescription: nil
                 operation: .sourceOver, fraction: 1.0)
 }
 
-// Wordmark + tagline on the right.
+// Wordmark, tagline, and feature list on the right — Title Case, one feature
+// per line, drawn as one block vertically centered against the waveform mark
+// (which is itself centered on H/2).
 let textX = 120 + markSize + 70.0
-let textRight = 70.0                 // right margin
-let textW = W - textX - textRight
+
 let title = "Bandwatch"
+let desc = "Native macOS Noise-Nuisance Monitor"
+let features = [
+    "Frequency-Band Detection",
+    "Evidence Clips",
+    "Coverage Logging",
+]
+
 let titleAttrs: [NSAttributedString.Key: Any] = [
     .font: NSFont.systemFont(ofSize: 96, weight: .bold),
     .foregroundColor: NSColor.white,
 ]
-let titleY = H/2 + 24
-(title as NSString).draw(at: NSPoint(x: textX, y: titleY), withAttributes: titleAttrs)
-
-// Line 1: the descriptive sentence. Line 2: the three features, on ONE line —
-// its font shrinks until the bulleted list fits the available width.
-let desc = "Native macOS noise-nuisance monitor"
-let features = "Frequency-band detection · evidence clips · coverage logging"
-
 let descAttrs: [NSAttributedString.Key: Any] = [
     .font: NSFont.systemFont(ofSize: 34, weight: .regular),
     .foregroundColor: subtle,
 ]
-let descY = titleY - 66
-(desc as NSString).draw(at: NSPoint(x: textX, y: descY), withAttributes: descAttrs)
+let featAttrs: [NSAttributedString.Key: Any] = [
+    .font: NSFont.systemFont(ofSize: 30, weight: .regular),
+    .foregroundColor: subtle,
+]
 
-var featSize = 34.0
-func featuresAttrs(_ pt: Double) -> [NSAttributedString.Key: Any] {
-    [.font: NSFont.systemFont(ofSize: pt, weight: .regular),
-     .foregroundColor: subtle]
+// (string, attrs, gap-after-this-line) rows, top to bottom.
+var rows: [(NSString, [NSAttributedString.Key: Any], Double)] = [
+    (title as NSString, titleAttrs, 18),
+    (desc as NSString, descAttrs, 22),
+]
+for (i, f) in features.enumerated() {
+    rows.append((f as NSString, featAttrs, i == features.count - 1 ? 0 : 8))
 }
-while featSize > 16,
-      (features as NSString).size(withAttributes: featuresAttrs(featSize)).width > textW {
-    featSize -= 1
+
+// Measure the block and place its top edge so the block is centered on H/2.
+let heights = rows.map { $0.0.size(withAttributes: $0.1).height }
+let totalHeight = heights.reduce(0, +) + rows.map { $0.2 }.reduce(0, +)
+var top = H/2 + totalHeight/2
+for (i, row) in rows.enumerated() {
+    // Non-flipped context: draw(at:) takes the lower-left, so subtract the line
+    // height to place this line's top edge at `top`.
+    row.0.draw(at: NSPoint(x: textX, y: top - heights[i]), withAttributes: row.1)
+    top -= (heights[i] + row.2)
 }
-let featY = descY - 58
-(features as NSString).draw(at: NSPoint(x: textX, y: featY), withAttributes: featuresAttrs(featSize))
 
 img.unlockFocus()
 
