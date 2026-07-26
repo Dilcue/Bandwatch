@@ -221,8 +221,19 @@ private func archiveHasAnyFile(atRoot root: URL) -> Bool {
     // — specifically so this test cannot trigger a real system permission
     // prompt (which would hang or block the headless test process).
     guard AudioCaptureEngine.currentPermission() == .granted else { return }
-
-    let s = MonitoringSession()
+    // The explicit-device guard added in Task 2 refuses to run start() at all
+    // when there is no USABLE selected device — so this test, which drives
+    // the real capture path, must explicitly pin one rather than relying on
+    // `MonitoringSession()`'s default (production) UserDefaults domain, whose
+    // persisted preference is untracked ambient state that may name a device
+    // not currently connected on whatever machine runs this. A fresh defaults
+    // suite plus the first actually-enumerated real device makes the test
+    // deterministic regardless of what's persisted for the real app.
+    guard let device = CoreAudioInputDevices().available().first else { return }
+    let defaults = UserDefaults(suiteName: "bw-test-\(UUID().uuidString)")!
+    defaults.set(device.uid, forKey: MonitoringSession.inputDeviceDefaultsKey)
+    let s = MonitoringSession(deviceEnumerator: CoreAudioInputDevices(), defaults: defaults)
+    #expect(s.hasUsableSelectedDevice())
     // C2: this test drives the real start(), which — if recording were left
     // enabled — would build a real RecordingCoordinator at
     // RecordingPaths.defaultRoot() (~/Library/Application Support/Bandwatch)
@@ -258,8 +269,15 @@ private func archiveHasAnyFile(atRoot root: URL) -> Bool {
     // sandboxed/CI environment without granted permission, guarded the same
     // way so it can never trigger a real system permission prompt.
     guard AudioCaptureEngine.currentPermission() == .granted else { return }
-
-    let s = MonitoringSession()
+    // See testStopStartCycleLeavesCoherentState's comment: the explicit-
+    // device guard needs a USABLE selected device to let start() reach the
+    // real capture path at all, so this pins one deterministically rather
+    // than depending on whatever is persisted in the production defaults
+    // domain on whatever machine runs this.
+    guard let device = CoreAudioInputDevices().available().first else { return }
+    let defaults = UserDefaults(suiteName: "bw-test-\(UUID().uuidString)")!
+    defaults.set(device.uid, forKey: MonitoringSession.inputDeviceDefaultsKey)
+    let s = MonitoringSession(deviceEnumerator: CoreAudioInputDevices(), defaults: defaults)
     // Recording must be enabled to exercise the polling task at all, but
     // must never touch the real evidence database -- point recordingRoot at
     // a fresh temp directory, never the production default.

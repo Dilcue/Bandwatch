@@ -33,6 +33,15 @@ public enum CaptureConnection: Equatable, Sendable {
     case awaitingReconnect(deviceName: String)
 }
 
+/// Why `start(bySchedule:)` did not bring monitoring up. Distinct from
+/// `lastError` (an `AudioCaptureEngine`/permission failure): this is the
+/// explicit-device guard refusing to run at all because nothing has ever
+/// been chosen -- there is no "chosen but absent" case here, since that one
+/// DOES start (into the awaiting-reconnect state; see `start(bySchedule:)`).
+public enum StartBlockedReason: Equatable, Sendable {
+    case noDeviceSelected
+}
+
 /// Orchestrates capture, analysis, and detection, publishing observable state
 /// for the UI. Owns no DSP logic of its own.
 @MainActor
@@ -86,6 +95,12 @@ public final class MonitoringSession {
     /// error banner lie about capture having failed.
     public private(set) var inputHealth: InputHealth = .healthy
     public private(set) var captureConnection: CaptureConnection = .connected
+    /// Set when `start(bySchedule:)` refused to run because nothing has ever
+    /// been chosen (the "chosen but absent" case does not set this -- it
+    /// starts into `.awaitingReconnect` instead). Cleared at the top of every
+    /// `start(bySchedule:)` call and by `stop()`, so it never outlives the
+    /// attempt that set it.
+    public private(set) var startBlockedReason: StartBlockedReason?
 
     public static let preRollSeconds: TimeInterval = 10
 
@@ -549,6 +564,18 @@ public final class MonitoringSession {
             pauseForDisconnect(deviceName: name)
         case .resume:
             availableInputDevices = fresh
+            // Re-resolve BEFORE resuming: the device is present again here
+            // (that's what made deviceChangeAction return .resume), so this
+            // safely re-pins `selectedInputDeviceUID` to it rather than
+            // clearing it (resolveInputSelection only clears when the
+            // preferred device is absent). This matters most for the
+            // at-start-absent path, where `selectedInputDeviceUID` was left
+            // nil by `start(bySchedule:)` because the device wasn't present
+            // yet -- without this, resumeAfterReconnect would target that
+            // stale nil (the built-in mic) instead of the real device. For
+            // the ordinary mid-session pause->resume path this is a no-op:
+            // `selectedInputDeviceUID` was already correctly pinned.
+            resolveInputSelection()
             resumeAfterReconnect()
         }
     }
@@ -762,6 +789,7 @@ public final class MonitoringSession {
         isStarting = true
         defer { isStarting = false }
         lastError = nil
+        startBlockedReason = nil
 
         // The app never registers with TCC — and so never appears in System
         // Settings › Privacy & Security › Microphone for the user to grant
@@ -836,7 +864,42 @@ public final class MonitoringSession {
         lastConsumedTotal = nil
         recordedSampleCountForTesting = 0
 
-        // Resolve the selected UID to a live device ID (nil → system default).
+        // Explicit-device guard: never fall back to the built-in mic. A nil
+        // `selectedInputDeviceUID` here means no usable device — either
+        // nothing has ever been chosen, or the chosen one is currently
+        // absent (see `hasUsableSelectedDevice`'s doc comment) — and letting
+        // `startCapture(targetDeviceUID: nil)` run in either case would open
+        // the OS default (the built-in mic) instead, silently recording the
+        // wrong input for a scheduled window with the pinned device absent.
+        if !hasUsableSelectedDevice() {
+            guard let persisted = persistedInputUID else {
+                // Nothing has ever been chosen. Manual: this signals the UI
+                // to prompt for a device. Scheduled: there is nothing to
+                // record from, so no run happens at all.
+                // (Task 4 posts the notification at this point.)
+                startBlockedReason = .noDeviceSelected
+                return   // isRunning stays false
+            }
+            // A device IS chosen but currently absent: bring the coordinator
+            // up (so the span exists, heartbeats, and can log the gap) and
+            // await the device's return — handleDeviceChange's `.resume`
+            // path auto-resumes capture once it's back (see the
+            // `resolveInputSelection()` call added there for this case).
+            // Capture is never opened here — no fallback device is ever used.
+            // (Task 4 posts the notification at this point.)
+            let name = persistedInputDeviceName ?? persisted
+            captureConnection = .awaitingReconnect(deviceName: name)
+            isRunning = true
+            startedBySchedule = bySchedule
+            await bringUpCoordinatorForAwaitingStart()
+            if !deviceDisconnectGapOpen, let c = coordinator {
+                deviceDisconnectGapOpen = true
+                await c.openGap(reason: .deviceLost, at: Date())
+            }
+            return
+        }
+
+        // Resolve the selected UID to a live device ID.
         do {
             try startCapture(targetDeviceUID: selectedInputDeviceUID)
         } catch let error as CaptureError {
@@ -853,91 +916,104 @@ public final class MonitoringSession {
         // be reset by one.
         startedBySchedule = bySchedule
 
-        if isRecordingEnabled {
-            // `recordingRoot` defaults to nil, meaning `defaultRoot()` — the
-            // real production location. Making this injectable (rather than
-            // hardcoding `defaultRoot()` here) is what lets tests point
-            // recording at a temporary directory instead of silently writing
-            // to the user's real evidence database.
-            let root = recordingRoot ?? RecordingPaths.defaultRoot()
-            let paths = RecordingPaths(root: root)
-            if let c = try? RecordingCoordinator(paths: paths, sampleRate: sampleRate,
-                                                 resolveGapsOpenedBefore: launchTime) {
-                coordinator = c
-                let uid = recordingDeviceUID()   // the device that actually captures
-                Task { await c.start(deviceUID: uid) }
+        await bringUpCoordinatorForAwaitingStart()
+    }
 
-                if isContinuousArchiveEnabled {
-                    // Bounded, dropping consumer for archive audio -- see the
-                    // `ArchiveChunk`/`archiveStreamBufferCount` doc comment above.
-                    // `.bufferingNewest` drops the OLDEST buffered windows once
-                    // full, which is what "a stalled disk loses the least-fresh
-                    // audio, not the most-fresh" requires. Only stood up when
-                    // the archive is actually enabled -- see that doc comment
-                    // for what leaving this nil means for the rest of the file.
-                    let (stream, continuation) = AsyncStream<ArchiveChunk>.makeStream(
-                        bufferingPolicy: .bufferingNewest(Self.archiveStreamBufferCount))
-                    archiveContinuation = continuation
-                    archiveConsumerTask = Task {
-                        for await chunk in stream {
-                            await c.appendArchive(chunk.samples, wallClock: chunk.wallClock)
-                        }
-                    }
+    /// Brings up the `RecordingCoordinator` (and, if enabled, the archive
+    /// stream) and starts the status-polling/heartbeat task. Shared by both
+    /// `start(bySchedule:)` paths: the normal present-device path (called
+    /// after `startCapture` succeeds, exactly as this was inlined there
+    /// before) and the at-start chosen-but-absent path (called INSTEAD of
+    /// `startCapture`, so the awaiting span still exists, heartbeats, and can
+    /// log the `.deviceLost` gap even though no capture is running). Each
+    /// call to `start(bySchedule:)` reaches exactly one of those two call
+    /// sites, so the span/coordinator is still brought up exactly once per
+    /// run. No-ops (leaves `coordinator` nil) when `isRecordingEnabled` is
+    /// false.
+    private func bringUpCoordinatorForAwaitingStart() async {
+        guard isRecordingEnabled else { return }
+        // `recordingRoot` defaults to nil, meaning `defaultRoot()` — the real
+        // production location. Making this injectable (rather than
+        // hardcoding `defaultRoot()` here) is what lets tests point
+        // recording at a temporary directory instead of silently writing to
+        // the user's real evidence database.
+        let root = recordingRoot ?? RecordingPaths.defaultRoot()
+        let paths = RecordingPaths(root: root)
+        guard let c = try? RecordingCoordinator(paths: paths, sampleRate: sampleRate,
+                                                resolveGapsOpenedBefore: launchTime) else { return }
+        coordinator = c
+        let uid = recordingDeviceUID()   // the device that actually captures
+        Task { await c.start(deviceUID: uid) }
+
+        if isContinuousArchiveEnabled {
+            // Bounded, dropping consumer for archive audio -- see the
+            // `ArchiveChunk`/`archiveStreamBufferCount` doc comment above.
+            // `.bufferingNewest` drops the OLDEST buffered windows once
+            // full, which is what "a stalled disk loses the least-fresh
+            // audio, not the most-fresh" requires. Only stood up when
+            // the archive is actually enabled -- see that doc comment
+            // for what leaving this nil means for the rest of the file.
+            let (stream, continuation) = AsyncStream<ArchiveChunk>.makeStream(
+                bufferingPolicy: .bufferingNewest(Self.archiveStreamBufferCount))
+            archiveContinuation = continuation
+            archiveConsumerTask = Task {
+                for await chunk in stream {
+                    await c.appendArchive(chunk.samples, wallClock: chunk.wallClock)
                 }
+            }
+        }
 
-                // Low-rate status polling, decoupled from analysis entirely
-                // -- see the property doc comment. Fetches immediately (no
-                // leading sleep) so the UI shows real status right away
-                // rather than waiting out the first interval, then sleeps
-                // between subsequent polls. Captures `c` directly (like
-                // `archiveConsumerTask` above), not `self.coordinator`, so it
-                // always polls the coordinator THIS start() created even if
-                // a later start() replaces `self.coordinator` with a new one
-                // before this task is torn down.
+        // Low-rate status polling, decoupled from analysis entirely
+        // -- see the property doc comment. Fetches immediately (no
+        // leading sleep) so the UI shows real status right away
+        // rather than waiting out the first interval, then sleeps
+        // between subsequent polls. Captures `c` directly (like
+        // `archiveConsumerTask` above), not `self.coordinator`, so it
+        // always polls the coordinator THIS start() created even if
+        // a later start() replaces `self.coordinator` with a new one
+        // before this task is torn down.
+        //
+        // Runs unconditionally -- NOT gated on `isContinuousArchiveEnabled`
+        // -- for two reasons: recording health/eventsWritten must stay
+        // visible with the archive off, and this is also what now
+        // enforces the disk floor (`enforceStorageFloor`, called
+        // first, every tick). That check used to live inside
+        // `appendArchive`, so it silently stopped running whenever the
+        // archive stream was never created; driving it from here
+        // instead means the floor is enforced whether or not the
+        // archive is running.
+        recordingStatusTask = Task { [weak self] in
+            var pollsSinceHeartbeat = 0
+            while !Task.isCancelled {
+                await c.enforceStorageFloor(at: Date())
+                let status = await c.status()
+                guard let self, !Task.isCancelled else { return }
+                // `droppedArchiveWindowCount` is tracked session-side
+                // (see its doc comment, I3) -- merge it in rather than
+                // publishing the coordinator's status verbatim, which
+                // knows nothing about drops that never reached it.
                 //
-                // Runs unconditionally -- NOT gated on `isContinuousArchiveEnabled`
-                // -- for two reasons: recording health/eventsWritten must stay
-                // visible with the archive off, and this is also what now
-                // enforces the disk floor (`enforceStorageFloor`, called
-                // first, every tick). That check used to live inside
-                // `appendArchive`, so it silently stopped running whenever the
-                // archive stream was never created; driving it from here
-                // instead means the floor is enforced whether or not the
-                // archive is running.
-                recordingStatusTask = Task { [weak self] in
-                    var pollsSinceHeartbeat = 0
-                    while !Task.isCancelled {
-                        await c.enforceStorageFloor(at: Date())
-                        let status = await c.status()
-                        guard let self, !Task.isCancelled else { return }
-                        // `droppedArchiveWindowCount` is tracked session-side
-                        // (see its doc comment, I3) -- merge it in rather than
-                        // publishing the coordinator's status verbatim, which
-                        // knows nothing about drops that never reached it.
-                        //
-                        // Republish only on a real change: an @Observable
-                        // assignment invalidates observers even when the value is
-                        // identical, and this polls at 1 Hz -- without the guard,
-                        // the menu-bar dropdown (which reads recordingStatus)
-                        // rebuilt once a second while open, disturbing selection.
-                        let merged = status.withDroppedArchiveWindowCount(self.droppedArchiveWindowCount)
-                        if self.recordingStatus != merged { self.recordingStatus = merged }
+                // Republish only on a real change: an @Observable
+                // assignment invalidates observers even when the value is
+                // identical, and this polls at 1 Hz -- without the guard,
+                // the menu-bar dropdown (which reads recordingStatus)
+                // rebuilt once a second while open, disturbing selection.
+                let merged = status.withDroppedArchiveWindowCount(self.droppedArchiveWindowCount)
+                if self.recordingStatus != merged { self.recordingStatus = merged }
 
-                        // Ride this same poll to heartbeat the monitoring span every
-                        // `heartbeatPollCount` polls (~30s at 1 Hz) -- see that
-                        // constant's doc comment. Deliberately NOT a separate
-                        // task/timer: this task is already cancelled before
-                        // `coordinator` is torn down (see `quiesceRunningSession`'s
-                        // doc comment), so it can never heartbeat a finalized span.
-                        pollsSinceHeartbeat += 1
-                        if pollsSinceHeartbeat >= Self.heartbeatPollCount {
-                            await c.heartbeatSpan(at: Date())
-                            pollsSinceHeartbeat = 0
-                        }
-
-                        try? await Task.sleep(for: Self.recordingStatusPollInterval)
-                    }
+                // Ride this same poll to heartbeat the monitoring span every
+                // `heartbeatPollCount` polls (~30s at 1 Hz) -- see that
+                // constant's doc comment. Deliberately NOT a separate
+                // task/timer: this task is already cancelled before
+                // `coordinator` is torn down (see `quiesceRunningSession`'s
+                // doc comment), so it can never heartbeat a finalized span.
+                pollsSinceHeartbeat += 1
+                if pollsSinceHeartbeat >= Self.heartbeatPollCount {
+                    await c.heartbeatSpan(at: Date())
+                    pollsSinceHeartbeat = 0
                 }
+
+                try? await Task.sleep(for: Self.recordingStatusPollInterval)
             }
         }
     }
@@ -1045,6 +1121,7 @@ public final class MonitoringSession {
 
     public func stop() {
         guard isRunning else { return }
+        startBlockedReason = nil
         let pendingEventWrite = quiesceRunningSession(now: clock.now(), wallNow: Date())
 
         if let c = coordinator {
