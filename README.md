@@ -75,7 +75,3 @@ it on a dedicated monitoring machine.
 ## License
 
 MIT — see [LICENSE](LICENSE). © 2026 Chris Connar.
-
-## Dedication
-
-*Dedicated to and necessitated by the unreasonable inhabitants of 206.*
