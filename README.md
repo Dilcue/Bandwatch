@@ -67,11 +67,6 @@ swift run Bandwatch
 (This repository uses a swiftly-managed toolchain; if `swift` on your PATH is
 older, activate your toolchain first.)
 
-## Deploying to another Mac
-
-See [DEPLOY.md](DEPLOY.md) for building a signed, universal `.app` and installing
-it on a dedicated monitoring machine.
-
 ## License
 
 MIT — see [LICENSE](LICENSE). © 2026 Chris Connar.
