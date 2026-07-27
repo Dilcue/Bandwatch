@@ -6,7 +6,7 @@ a landlord, council, or mediator.
 
 ![Bandwatch main window — live spectrum and band levels](screenshots/main-window.png)
 
-## What it does
+## What It Does
 
 - **Live frequency analysis** — a real-time spectrum and a band-level meter, with
   Fast/Slow time weighting.
@@ -26,7 +26,7 @@ a landlord, council, or mediator.
 
 ![Evidence PDF report](screenshots/evidence-pdf.png)
 
-## How it reads the numbers (honesty notes)
+## How It Reads the Numbers (Honesty Notes)
 
 Bandwatch documents the **pattern** of noise in a chosen frequency band — **when**
 events happen, **how often**, **how long** they last, and their **relative**
@@ -39,7 +39,7 @@ monitoring log, not a certified acoustic instrument:
   meter or a professional.
 - The **equipment is not calibrated** — a consumer microphone/interface with
   uncharacterized sensitivity and low-frequency response (see *Choosing a
-  microphone* below).
+  Microphone* below).
 - The **detection threshold is set by you** — an "event" is the in-band level
   crossing the threshold in effect at that moment, and each event stores the
   exact threshold that applied.
@@ -52,16 +52,16 @@ monitoring log, not a certified acoustic instrument:
 - Coverage is a **measured record** of when the recorder was running, not an
   inference.
 
-## Choosing a microphone
+## Choosing a Microphone
 
-> **The MacBook's built-in microphone is not reliable for band-filtered
-> monitoring.** Its aggressive noise suppression and voice-tuned processing
-> distort low-frequency content, so a real subwoofer rumble can read faint or
-> inconsistent. **Use a discrete microphone** — a USB mic, a lavalier, or an
-> audio interface — for trustworthy measurements. Pick it from the **Input**
-> menu on the main window.
+**The MacBook's built-in microphone is not reliable for band-filtered
+monitoring.** Its aggressive noise suppression and voice-tuned processing
+distort low-frequency content, so a real subwoofer rumble can read faint or
+inconsistent. **Use a discrete microphone** — a USB mic, a lavalier, or an
+audio interface — for trustworthy measurements. Pick it from the **Input**
+menu on the main window.
 
-## Build & run
+## Build & Run
 
 **Prefer a ready-to-run app?** Each [release](https://github.com/Dilcue/Bandwatch/releases/latest)
 ships a prebuilt `Bandwatch.app` inside `Bandwatch-<version>-universal.zip` — a
