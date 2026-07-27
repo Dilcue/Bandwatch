@@ -28,8 +28,21 @@ a landlord, council, or mediator.
 
 ## How it reads the numbers (honesty notes)
 
+Bandwatch documents the **pattern** of noise in a chosen frequency band — **when**
+events happen, **how often**, **how long** they last, and their **relative**
+loudness over time, each stamped with the input device that captured it. It is a
+monitoring log, not a certified acoustic instrument:
+
 - Levels are **dBFS, not calibrated SPL** — a relative digital scale, not a
-  decibel reading you could cite as an absolute loudness.
+  decibel reading you could cite as an absolute loudness. Establishing an
+  absolute level (e.g. against a noise ordinance) needs a calibrated sound-level
+  meter or a professional.
+- The **equipment is not calibrated** — a consumer microphone/interface with
+  uncharacterized sensitivity and low-frequency response (see *Choosing a
+  microphone* below).
+- The **detection threshold is set by you** — an "event" is the in-band level
+  crossing the threshold in effect at that moment, and each event stores the
+  exact threshold that applied.
 - Recorded audio is **band-filtered** — only frequencies inside the chosen band
   are kept. For a **low bass band** (e.g. a subwoofer's 20–120 Hz) this strips out
   the speech range, so those clips contain no intelligible speech. **A band that
