@@ -11,16 +11,6 @@ public enum GapReason: String, Sendable, CaseIterable {
     case shutdown = "shutdown"
     case captureStalled = "capture_stalled"
     case noSignal = "no_signal"
-    /// A window of archive audio was dropped by the bounded, backpressured
-    /// delivery stream between `MonitoringSession`'s analysis loop and
-    /// `RecordingCoordinator` (a stalled disk that could not keep up) --
-    /// see `RecordingCoordinator.noteArchiveWindowDropped(at:)`. Distinct
-    /// from `.writeFailure`: a write failure means a write was attempted
-    /// and failed, while this means the audio never reached a write
-    /// attempt at all, and the archive segment it would have gone into now
-    /// has a splice a naive reader would not detect from the filename or
-    /// duration alone.
-    case archiveWindowDropped = "archive_window_dropped"
     /// Fallback for a reason string this build doesn't recognise — e.g. a row
     /// written by a future version with a new reason. Never inferred as
     /// `.shutdown`: that would misreport a possibly non-benign gap as a
