@@ -11,7 +11,8 @@ private func tempRoot() -> URL {
 
 @Test func testDefaultPolicyMatchesSpec() {
     let p = RetentionPolicy()
-    #expect(p.diskFloorBytes == 10 * 1024 * 1024 * 1024)
+    #expect(p.diskFloorBytes == 8 * 1024 * 1024 * 1024)
+    #expect(p.diskWarningBytes == 16 * 1024 * 1024 * 1024)
 }
 
 @Test func testFreeBytesIsPositiveOnARealVolume() {

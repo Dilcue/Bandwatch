@@ -6,14 +6,14 @@ public struct RetentionPolicy: Equatable, Sendable {
     /// The free-space level at which `StorageManager.isLowOnDisk()` starts
     /// reporting true -- a warning band ABOVE `diskFloorBytes`, so callers
     /// can alert the user before the floor actually stops recording. `nil`
-    /// at init time defaults to `2 * diskFloorBytes` (20 GB against the 10 GB
+    /// at init time defaults to `2 * diskFloorBytes` (16 GB against the 8 GB
     /// floor default), computed here rather than as a literal default
     /// argument so a caller who passes a custom `diskFloorBytes` still gets
-    /// a proportionate warning band instead of one keyed to the 10 GB
+    /// a proportionate warning band instead of one keyed to the 8 GB
     /// default.
     public var diskWarningBytes: Int64
 
-    public init(diskFloorBytes: Int64 = 10 * 1024 * 1024 * 1024, diskWarningBytes: Int64? = nil) {
+    public init(diskFloorBytes: Int64 = 8 * 1024 * 1024 * 1024, diskWarningBytes: Int64? = nil) {
         self.diskFloorBytes = diskFloorBytes
         if let diskWarningBytes {
             self.diskWarningBytes = diskWarningBytes
@@ -38,8 +38,8 @@ public struct RetentionPolicy: Equatable, Sendable {
 /// application never pretends to record, and it never deletes existing
 /// evidence to make room.
 ///
-/// The 10 GB floor default is a placeholder from the spec, not derived from a
-/// measured MB/hour figure. Real disk consumption under band-filtered audio
+/// The 8 GB floor default is a placeholder, not derived from a measured
+/// MB/hour figure. Real disk consumption under band-filtered audio
 /// is not yet known and will be measured during manual verification; do not
 /// tune this value against an unverified estimate.
 public final class StorageManager {
