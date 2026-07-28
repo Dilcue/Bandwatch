@@ -54,13 +54,14 @@ monitoring log, not a certified acoustic instrument:
 - Bandwatch records **short per-event clips**, not continuous audio — only the
   moments that cross your threshold are kept.
 - **Bandwatch never deletes your recordings.** If free space drops below a
-  warning level (default **20 GB**), it **warns you** — an in-app banner and a
-  notification — so you can act before recording is affected. If free space
-  keeps falling and crosses a hard floor (default **10 GB**), it **stops
-  recording and logs a gap** rather than writing onto a full disk, or deleting
-  existing evidence to make room. These defaults are conservative placeholders,
-  not tuned to measured disk usage — **back up your data if you are relying on
-  it.**
+  warning level (default **20 GB**), it **warns you** with an in-app banner —
+  and, in a notarized build, a macOS notification (the ad-hoc-signed release
+  builds show only the banner) — so you can act before recording is affected.
+  If free space keeps falling and crosses a hard floor (default **10 GB**), it
+  **stops recording and logs a gap** rather than writing onto a full disk, or
+  deleting existing evidence to make room. These defaults are conservative
+  placeholders, not tuned to measured disk usage — **back up your data if you
+  are relying on it.**
 
 ## Choosing a Microphone
 
