@@ -1228,3 +1228,114 @@ private func tempRoot() -> URL {
     try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
     return d
 }
+
+// MARK: - Task 2: proactive low-disk warning (banner + notification)
+//
+// `handleRecordingStatusPoll(_:)` is the exact per-poll decision
+// `recordingStatusTask` makes every tick (see its doc comment) -- exposed
+// directly, mirroring `processLoopIteration(now:)`'s seam for the
+// stall/no-signal detectors, so the notify-once/re-arm-on-recovery logic can
+// be driven deterministically with synthetic `RecordingStatus` values instead
+// of needing real free disk space or a live 1 Hz timer.
+
+@MainActor
+private final class FakeNotifier: UserNotifying {
+    private(set) var posts: [(title: String, body: String, id: String)] = []
+    private var postedIDs: Set<String> = []
+    func requestAuthorization() async {}
+    func post(title: String, body: String, id: String) {
+        guard postedIDs.insert(id).inserted else { return }
+        posts.append((title: title, body: body, id: id))
+    }
+}
+
+private func lowDiskStatus(freeBytes: Int64 = 5_000_000_000) -> RecordingStatus {
+    RecordingStatus(isRecording: true, eventsWritten: 0, lastError: nil,
+                    freeBytes: freeBytes, isLowOnDisk: true)
+}
+
+private func healthyDiskStatus(freeBytes: Int64 = 50_000_000_000) -> RecordingStatus {
+    RecordingStatus(isRecording: true, eventsWritten: 0, lastError: nil,
+                    freeBytes: freeBytes, isLowOnDisk: false)
+}
+
+@MainActor
+@Test func testHandleRecordingStatusPollPublishesStatusRegardlessOfDiskLevel() {
+    let s = MonitoringSession()
+    let status = healthyDiskStatus()
+    s.handleRecordingStatusPoll(status)
+    #expect(s.recordingStatus == status)
+}
+
+@MainActor
+@Test func testLowDiskNotifiesOnceThenSuppressesRepeatsWhileStillLow() {
+    let notifier = FakeNotifier()
+    let s = MonitoringSession(notifier: notifier)
+
+    s.handleRecordingStatusPoll(lowDiskStatus())
+    #expect(notifier.posts.count == 1)
+
+    // Several more ticks, still low -- must NOT spam a post per tick.
+    s.handleRecordingStatusPoll(lowDiskStatus())
+    s.handleRecordingStatusPoll(lowDiskStatus())
+    #expect(notifier.posts.count == 1)
+}
+
+@MainActor
+@Test func testLowDiskReArmsAfterRecoveryAndReNotifiesUnderADistinctID() {
+    let notifier = FakeNotifier()
+    let s = MonitoringSession(notifier: notifier)
+
+    s.handleRecordingStatusPoll(lowDiskStatus())
+    #expect(notifier.posts.count == 1)
+    let firstID = notifier.posts[0].id
+
+    // Disk recovers -- re-arms the dedupe flag, but posts nothing itself.
+    s.handleRecordingStatusPoll(healthyDiskStatus())
+    #expect(notifier.posts.count == 1)
+
+    // Low again: a NEW episode, so it must alert again, under a fresh id --
+    // otherwise `SystemUserNotifier`'s permanent per-id dedupe would silently
+    // swallow this second, genuinely new warning.
+    s.handleRecordingStatusPoll(lowDiskStatus())
+    #expect(notifier.posts.count == 2)
+    #expect(notifier.posts[1].id != firstID)
+}
+
+@MainActor
+@Test func testLowDiskNotificationNamesFreeSpace() {
+    let notifier = FakeNotifier()
+    let s = MonitoringSession(notifier: notifier)
+
+    s.handleRecordingStatusPoll(lowDiskStatus(freeBytes: 5_500_000_000))   // ~5.1 GB
+
+    #expect(notifier.posts.count == 1)
+    #expect(notifier.posts[0].title == "Bandwatch — low disk space")
+    #expect(notifier.posts[0].body.contains("5.1 GB"))
+}
+
+@MainActor
+@Test func testStoppingSessionResetsLowDiskReArmSoTheNextSessionAlertsAgain() async {
+    let notifier = FakeNotifier()
+    let s = MonitoringSession(notifier: notifier)
+
+    // First session goes low on disk and notifies.
+    await s.startRecordingForTesting(root: tempRoot(),
+                                     policy: RetentionPolicy(diskWarningBytes: Int64.max))
+    await waitUntilTrue { notifier.posts.count == 1 }
+    #expect(notifier.posts.count == 1)
+    let firstID = notifier.posts[0].id
+
+    s.stop()
+
+    // A second session, ALSO starting out low on disk, must not be silently
+    // suppressed by re-arm state left over from before the first session
+    // stopped -- it gets its own fresh episode (and therefore its own id).
+    await s.startRecordingForTesting(root: tempRoot(),
+                                     policy: RetentionPolicy(diskWarningBytes: Int64.max))
+    await waitUntilTrue { notifier.posts.count == 2 }
+    #expect(notifier.posts.count == 2)
+    #expect(notifier.posts[1].id != firstID)
+
+    s.stop()
+}

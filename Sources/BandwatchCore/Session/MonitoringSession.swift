@@ -324,6 +324,22 @@ public final class MonitoringSession {
     /// How often `recordingStatusTask` polls. 1 Hz is ample: recording
     /// health is monotonic/slow-changing, unlike the spectrum/level display.
     private static let recordingStatusPollInterval: Duration = .seconds(1)
+    /// Dedupe for the proactive low-disk notification: true once it has been
+    /// posted for the CURRENT low-disk episode, reset back to false as soon
+    /// as `RecordingStatus.isLowOnDisk` clears (disk recovers) or the
+    /// session stops, so a later episode alerts again. MIRRORS
+    /// `MonitoringScheduler`'s `armedIdleDeviceMissingPosted`.
+    @ObservationIgnored private var lowDiskNotified = false
+    /// Monotonic counter, incremented each time a NEW low-disk episode
+    /// actually posts. Folded into the notification id (see
+    /// `UserNotifying.post(lowDiskFreeBytes:episode:)`) so each episode's
+    /// post gets a distinct id -- without this, `SystemUserNotifier`'s
+    /// permanent per-id dedupe would silently swallow every low-disk episode
+    /// after the very first one in the process's lifetime. Deliberately NOT
+    /// reset on stop/start (only `lowDiskNotified` is) -- see
+    /// `MonitoringScheduler.armedIdleDeviceMissingEpisode`'s identical
+    /// reasoning.
+    @ObservationIgnored private var lowDiskEpisode = 0
     /// Heartbeat the monitoring span every 30 polls. At the 1 Hz poll rate that is
     /// ~30 s -- the worst-case coverage lost if the app crashes mid-session, always
     /// in the under-reporting (never overstating) direction. See the spec.
@@ -979,12 +995,7 @@ public final class MonitoringSession {
                 await c.enforceStorageFloor(at: Date())
                 let status = await c.status()
                 guard let self, !Task.isCancelled else { return }
-                // Republish only on a real change: an @Observable
-                // assignment invalidates observers even when the value is
-                // identical, and this polls at 1 Hz -- without the guard,
-                // the menu-bar dropdown (which reads recordingStatus)
-                // rebuilt once a second while open, disturbing selection.
-                if self.recordingStatus != status { self.recordingStatus = status }
+                self.handleRecordingStatusPoll(status)
 
                 // Ride this same poll to heartbeat the monitoring span every
                 // `heartbeatPollCount` polls (~30s at 1 Hz) -- see that
@@ -1001,6 +1012,34 @@ public final class MonitoringSession {
                 try? await Task.sleep(for: Self.recordingStatusPollInterval)
             }
         }
+    }
+
+    /// Republishes `status` to `recordingStatus` (only on real change -- an
+    /// `@Observable` assignment invalidates observers even when the value is
+    /// identical, and this is driven from a 1 Hz poll -- without the guard,
+    /// the menu-bar dropdown, which reads `recordingStatus`, rebuilt once a
+    /// second while open, disturbing selection) and, if the disk has
+    /// crossed into the warning band, alerts once per episode via
+    /// `notifier`. MIRRORS `MonitoringScheduler.updateArmedIdleDeviceWatch`'s
+    /// per-episode dedupe: `lowDiskNotified` re-arms as soon as
+    /// `status.isLowOnDisk` clears, and `lowDiskEpisode` is folded into the
+    /// notification id so a LATER episode still gets through
+    /// `SystemUserNotifier`'s permanent per-id dedupe. Shared by both
+    /// `bringUpCoordinatorForAwaitingStart`'s and
+    /// `startRecordingForTesting`'s polling tasks, and driven directly (no
+    /// timer, no coordinator) by tests -- mirrors `processLoopIteration(now:)`'s
+    /// seam for the stall/no-signal detectors.
+    func handleRecordingStatusPoll(_ status: RecordingStatus) {
+        if recordingStatus != status { recordingStatus = status }
+
+        guard status.isLowOnDisk else {
+            lowDiskNotified = false
+            return
+        }
+        guard !lowDiskNotified else { return }
+        lowDiskNotified = true
+        lowDiskEpisode += 1
+        notifier?.post(lowDiskFreeBytes: status.freeBytes, episode: lowDiskEpisode)
     }
 
     /// Everything needed to write an event's clip when the event is still
@@ -1091,6 +1130,13 @@ public final class MonitoringSession {
         recordingStatusTask?.cancel()
         recordingStatusTask = nil
         recordingStatus = nil
+        // A stopped session is no longer "watching" the disk at all -- the
+        // NEXT session (even a resumed one) deserves a fresh low-disk
+        // assessment rather than inheriting a stale re-arm state from
+        // before this stop. Mirrors `MonitoringScheduler.deactivate()`
+        // resetting `armedIdleDeviceMissingPosted`. `lowDiskEpisode` itself
+        // is deliberately NOT reset here -- see its doc comment.
+        lowDiskNotified = false
 
         return pendingEventWrite
     }
@@ -1319,7 +1365,8 @@ public final class MonitoringSession {
     /// portion of `start()`, nothing about how audio is analyzed or
     /// recorded once running. `analysisTask` is deliberately left nil (no
     /// live timer loop): callers drive frames in directly.
-    func startRecordingForTesting(root: URL, bySchedule: Bool = false) async {
+    func startRecordingForTesting(root: URL, bySchedule: Bool = false,
+                                  policy: RetentionPolicy = RetentionPolicy()) async {
         guard !isRunning else { return }
         ringBuffer.clear()
         lastObservedTotalWritten = 0
@@ -1346,7 +1393,7 @@ public final class MonitoringSession {
         recordingRoot = root
 
         let paths = RecordingPaths(root: root)
-        guard let c = try? RecordingCoordinator(paths: paths, sampleRate: sampleRate) else {
+        guard let c = try? RecordingCoordinator(paths: paths, sampleRate: sampleRate, policy: policy) else {
             isRunning = false
             startedBySchedule = false
             return
@@ -1371,7 +1418,7 @@ public final class MonitoringSession {
                 await c.enforceStorageFloor(at: Date())
                 let status = await c.status()
                 guard let self, !Task.isCancelled else { return }
-                if self.recordingStatus != status { self.recordingStatus = status }
+                self.handleRecordingStatusPoll(status)
 
                 // Mirrors start()'s own heartbeat wiring -- see that task's comment.
                 pollsSinceHeartbeat += 1

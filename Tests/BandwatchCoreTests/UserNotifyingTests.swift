@@ -123,6 +123,52 @@ private final class FakeNotifier: UserNotifying {
     #expect(notifier.posts.count == 1)
 }
 
+// MARK: - post(lowDiskFreeBytes:episode:) extension mapping (Task 2)
+
+@MainActor
+@Test func testPostLowDiskNamesFreeSpaceInGB() {
+    let notifier = FakeNotifier()
+
+    notifier.post(lowDiskFreeBytes: 5_500_000_000, episode: 1)   // ~5.1 GiB
+
+    #expect(notifier.posts.count == 1)
+    #expect(notifier.posts[0].title == "Bandwatch — low disk space")
+    #expect(notifier.posts[0].body.contains("5.1 GB"))
+    #expect(notifier.posts[0].id == "low-disk.1")
+}
+
+@MainActor
+@Test func testPostLowDiskWithNilFreeBytesStillNamesTheConditionNotAGB() {
+    let notifier = FakeNotifier()
+
+    notifier.post(lowDiskFreeBytes: nil, episode: 1)
+
+    #expect(notifier.posts.count == 1)
+    #expect(!notifier.posts[0].body.contains("GB"))
+    #expect(notifier.posts[0].body.contains("could not be determined"))
+}
+
+@MainActor
+@Test func testPostLowDiskDifferentEpisodesGetDistinctIDsAndBothRecord() {
+    let notifier = FakeNotifier()
+
+    notifier.post(lowDiskFreeBytes: 1_000_000_000, episode: 1)
+    notifier.post(lowDiskFreeBytes: 1_000_000_000, episode: 2)
+
+    #expect(notifier.posts.count == 2)
+    #expect(notifier.posts[0].id != notifier.posts[1].id)
+}
+
+@MainActor
+@Test func testPostLowDiskSameEpisodeDedupesViaStableID() {
+    let notifier = FakeNotifier()
+
+    notifier.post(lowDiskFreeBytes: 1_000_000_000, episode: 1)
+    notifier.post(lowDiskFreeBytes: 1_000_000_000, episode: 1)
+
+    #expect(notifier.posts.count == 1)
+}
+
 // MARK: - SystemUserNotifier: deliver-then-dedupe ordering (real class, seams injected)
 //
 // These exercise the real `SystemUserNotifier`, not a fake, using its

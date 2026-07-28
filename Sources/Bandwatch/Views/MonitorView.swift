@@ -97,6 +97,15 @@ private struct StatusSection: View {
                 errorBanner(error)
             }
 
+            // Orthogonal to the disconnect/no-signal/armed-idle chain below --
+            // "the disk is getting full" can be true at the same time as any of
+            // those, so it renders independently rather than being folded into
+            // the if/else-if chain (see that chain's own comment on why ITS
+            // members must stay mutually exclusive).
+            if isLowOnDisk {
+                lowDiskBanner
+            }
+
             // Awaiting-reconnect, no-signal, and armed-idle are chained into a
             // single if/else-if so at most one ever renders. They are NOT
             // mutually exclusive by construction: a scheduled start on an
@@ -120,6 +129,10 @@ private struct StatusSection: View {
 
     private var showingNoSignal: Bool {
         session.isRunning && session.inputHealth == .noSignal
+    }
+
+    private var isLowOnDisk: Bool {
+        session.isRunning && (session.recordingStatus?.isLowOnDisk == true)
     }
 
     private var awaitingReconnectName: String? {
@@ -159,6 +172,30 @@ private struct StatusSection: View {
         // opposite the scheme -- the reverse of the always-white error banner,
         // whose red background stays dark in both modes.
         Text("No input signal for an extended period. This usually means the microphone, interface, or mixer is off, muted, or disconnected. Monitoring is continuing and will recover automatically if the signal returns.")
+            .font(.callout)
+            .fixedSize(horizontal: false, vertical: true)
+            .foregroundStyle(scheme == .dark ? .black : .white)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Palette.warning(scheme).opacity(0.85))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    /// Proactive warning shown once free space enters the warning band --
+    /// ABOVE the hard floor that `RecordingCoordinator.enforceStorageFloor`
+    /// actually stops recording at. See `handleRecordingStatusPoll`'s
+    /// per-episode notification, which fires alongside this banner.
+    private var lowDiskBanner: some View {
+        let text: String
+        if let free = session.recordingStatus?.freeBytes {
+            let gb = Double(free) / 1_073_741_824
+            text = String(format: "Low disk space: %.1f GB free — monitoring will stop if the disk " +
+                          "fills. Free up space to keep recording.", gb)
+        } else {
+            text = "Low disk space: free space could not be determined — monitoring will stop if " +
+                "the disk fills. Free up space to keep recording."
+        }
+        return Text(text)
             .font(.callout)
             .fixedSize(horizontal: false, vertical: true)
             .foregroundStyle(scheme == .dark ? .black : .white)

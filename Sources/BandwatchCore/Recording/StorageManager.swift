@@ -3,8 +3,31 @@ import Foundation
 public struct RetentionPolicy: Equatable, Sendable {
     public var diskFloorBytes: Int64
 
-    public init(diskFloorBytes: Int64 = 10 * 1024 * 1024 * 1024) {
+    /// The free-space level at which `StorageManager.isLowOnDisk()` starts
+    /// reporting true -- a warning band ABOVE `diskFloorBytes`, so callers
+    /// can alert the user before the floor actually stops recording. `nil`
+    /// at init time defaults to `2 * diskFloorBytes` (20 GB against the 10 GB
+    /// floor default), computed here rather than as a literal default
+    /// argument so a caller who passes a custom `diskFloorBytes` still gets
+    /// a proportionate warning band instead of one keyed to the 10 GB
+    /// default.
+    public var diskWarningBytes: Int64
+
+    public init(diskFloorBytes: Int64 = 10 * 1024 * 1024 * 1024, diskWarningBytes: Int64? = nil) {
         self.diskFloorBytes = diskFloorBytes
+        if let diskWarningBytes {
+            self.diskWarningBytes = diskWarningBytes
+        } else {
+            // Saturating, not `diskFloorBytes * 2`: existing tests (and any
+            // future caller) construct an "unreachable floor" policy with
+            // `diskFloorBytes: Int64.max` to force `isBelowFloor()` true
+            // regardless of real free space -- plain multiplication there
+            // overflows `Int64` and traps. Clamping to `.max` is also the
+            // semantically right answer: an unreachable floor should default
+            // to an equally unreachable (not wrapped-negative) warning band.
+            let (doubled, overflowed) = diskFloorBytes.multipliedReportingOverflow(by: 2)
+            self.diskWarningBytes = overflowed ? Int64.max : doubled
+        }
     }
 }
 
@@ -54,5 +77,15 @@ public final class StorageManager {
         // reconsidering the failure mode.
         guard let free = freeBytes() else { return true }
         return free < policy.diskFloorBytes
+    }
+
+    /// True once free space has dropped into the warning band ABOVE the hard
+    /// floor -- the proactive signal a caller alerts the user on, before
+    /// `isBelowFloor()` actually stops recording. Same fail-closed contract
+    /// as `isBelowFloor()`: an indeterminate free-space reading is treated as
+    /// low, not as healthy.
+    public func isLowOnDisk() -> Bool {
+        guard let free = freeBytes() else { return true }
+        return free < policy.diskWarningBytes
     }
 }

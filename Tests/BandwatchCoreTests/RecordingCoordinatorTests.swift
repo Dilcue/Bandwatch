@@ -388,6 +388,37 @@ private func block(_ n: Int, _ v: Float = 0.1) -> [Float] { [Float](repeating: v
     await c.shutdown()
 }
 
+// `status().isLowOnDisk` must reflect `StorageManager.isLowOnDisk()`, the
+// proactive warning ABOVE the hard floor -- an unreachable warning threshold
+// forces it true regardless of real free space, mirroring
+// `testEnforceStorageFloorStopsRecordingWithoutAnyArchiveAppend`'s use of
+// `RetentionPolicy(diskFloorBytes: Int64.max)` for the floor itself. Crucially,
+// recording must NOT stop merely from crossing the warning band -- only
+// `enforceStorageFloor` (a separate, hard-floor check) does that.
+@Test func testStatusReflectsLowOnDiskWithoutStoppingRecording() async throws {
+    let p = tempPaths()
+    let c = try RecordingCoordinator(paths: p, sampleRate: 44100,
+                                     policy: RetentionPolicy(diskWarningBytes: Int64.max))
+    await c.start(deviceUID: "D")
+    let s = await c.status()
+    #expect(s.isLowOnDisk == true)
+    #expect(s.isRecording == true)
+    await c.stop()
+    await c.shutdown()
+}
+
+// An unreachable (zero) warning threshold means status() must report healthy.
+@Test func testStatusReportsNotLowOnDiskWithAmpleFreeSpace() async throws {
+    let p = tempPaths()
+    let c = try RecordingCoordinator(paths: p, sampleRate: 44100,
+                                     policy: RetentionPolicy(diskWarningBytes: 0))
+    await c.start(deviceUID: "D")
+    let s = await c.status()
+    #expect(s.isLowOnDisk == false)
+    await c.stop()
+    await c.shutdown()
+}
+
 // MARK: - Monitoring span lifecycle (Task 3)
 
 @Test func testStartOpensASpanEndedAtStop() async throws {

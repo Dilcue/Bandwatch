@@ -26,18 +26,27 @@ public struct RecordingStatus: Equatable, Sendable {
     /// UI can trust at a glance.
     public let consecutiveWriteFailures: Int
 
+    /// True once free space is in the warning band `StorageManager.isLowOnDisk()`
+    /// reports -- ABOVE the hard floor that actually stops recording
+    /// (`enforceStorageFloor`). This is what lets a caller warn the user
+    /// proactively, before recording actually halts. See `StorageManager`'s
+    /// doc comment for the floor/warning relationship.
+    public let isLowOnDisk: Bool
+
     public init(isRecording: Bool,
                 eventsWritten: Int,
                 lastError: String?,
                 freeBytes: Int64?,
                 staleOpenGaps: Int = 0,
-                consecutiveWriteFailures: Int = 0) {
+                consecutiveWriteFailures: Int = 0,
+                isLowOnDisk: Bool = false) {
         self.isRecording = isRecording
         self.eventsWritten = eventsWritten
         self.lastError = lastError
         self.freeBytes = freeBytes
         self.staleOpenGaps = staleOpenGaps
         self.consecutiveWriteFailures = consecutiveWriteFailures
+        self.isLowOnDisk = isLowOnDisk
     }
 }
 
@@ -326,7 +335,8 @@ public actor RecordingCoordinator {
                         lastError: lastError,
                         freeBytes: storage.freeBytes(),
                         staleOpenGaps: staleOpenGaps,
-                        consecutiveWriteFailures: consecutiveWriteFailures)
+                        consecutiveWriteFailures: consecutiveWriteFailures,
+                        isLowOnDisk: storage.isLowOnDisk())
     }
 
     // MARK: Private

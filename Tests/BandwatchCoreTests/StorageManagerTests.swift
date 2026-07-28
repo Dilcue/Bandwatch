@@ -35,6 +35,40 @@ private func tempRoot() -> URL {
     #expect((free ?? 0) > 0)
 }
 
+@Test func testDefaultWarningIsTwiceTheFloor() {
+    let p = RetentionPolicy()
+    #expect(p.diskWarningBytes == 2 * p.diskFloorBytes)
+}
+
+@Test func testCustomFloorScalesTheDefaultWarningProportionately() {
+    let p = RetentionPolicy(diskFloorBytes: 5 * 1024 * 1024 * 1024)
+    #expect(p.diskWarningBytes == 10 * 1024 * 1024 * 1024)
+}
+
+@Test func testIsLowOnDiskTrueWhenFreeIsBelowWarningButAboveFloor() {
+    // Read the real free space on this volume once, then set a warning
+    // threshold just above it (so isLowOnDisk() reports true) and a floor of
+    // 0 (so isBelowFloor() stays false) -- proves the warning band is
+    // genuinely distinct from, and checked independently of, the hard floor.
+    let root = tempRoot()
+    let probe = StorageManager(paths: RecordingPaths(root: root))
+    let free = probe.freeBytes() ?? 0
+
+    let m = StorageManager(paths: RecordingPaths(root: root),
+                           policy: RetentionPolicy(diskFloorBytes: 0, diskWarningBytes: free + 1))
+    #expect(m.isBelowFloor() == false)
+    #expect(m.isLowOnDisk() == true)
+}
+
+@Test func testIsLowOnDiskFalseWithAmpleFreeSpace() {
+    // An unreachable (zero) warning threshold means free space can never be
+    // "below" it, mirroring how `RetentionPolicy(diskFloorBytes: 0)` proves
+    // `isBelowFloor()`'s no-op case elsewhere in this suite.
+    let m = StorageManager(paths: RecordingPaths(root: tempRoot()),
+                           policy: RetentionPolicy(diskWarningBytes: 0))
+    #expect(m.isLowOnDisk() == false)
+}
+
 @Test func testIsBelowFloorFailsClosedWhenFreeSpaceIndeterminate() {
     // When freeBytes() returns nil (e.g., due to an inaccessible ancestor chain),
     // isBelowFloor() must fail closed and return true to prevent recording when

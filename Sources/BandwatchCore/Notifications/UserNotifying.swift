@@ -64,6 +64,30 @@ public extension UserNotifying {
     func post(blocked reason: ScheduledStartBlockReason) {
         post(title: reason.notificationTitle, body: reason.notificationBody, id: reason.notificationID)
     }
+
+    /// Proactive low-disk warning, posted before the disk-floor stop
+    /// (`StorageManager.isBelowFloor`/`RecordingCoordinator.enforceStorageFloor`)
+    /// actually halts recording. `freeBytes` names the free space in the
+    /// copy when known; `episode` is folded into the notification id so a
+    /// LATER low-disk episode (disk recovered, then dropped low again) still
+    /// gets through `SystemUserNotifier`'s permanent per-id dedupe --
+    /// mirrors `MonitoringScheduler`'s armed-idle
+    /// `armedIdleDeviceMissingEpisode` pattern. Callers own the re-arm
+    /// decision (i.e. only bump `episode` and call this once per episode);
+    /// this function itself does no deduping beyond what the same `id`
+    /// already gets from the underlying `post(title:body:id:)`.
+    func post(lowDiskFreeBytes: Int64?, episode: Int) {
+        let body: String
+        if let freeBytes = lowDiskFreeBytes {
+            let gb = Double(freeBytes) / 1_073_741_824
+            body = String(format: "%.1f GB free — monitoring will stop if the disk keeps filling. " +
+                          "Free up space to keep recording.", gb)
+        } else {
+            body = "Free space could not be determined — monitoring will stop if the disk keeps " +
+                "filling. Free up space to keep recording."
+        }
+        post(title: "Bandwatch — low disk space", body: body, id: "low-disk.\(episode)")
+    }
 }
 
 /// Real `UNUserNotificationCenter`-backed notifier. Authorization is checked
