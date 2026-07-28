@@ -51,16 +51,16 @@ monitoring log, not a certified acoustic instrument:
   from higher bands as potentially containing conversation before sharing them.
 - Coverage is a **measured record** of when the recorder was running, not an
   inference.
-- **Data can be deleted only to avoid filling the disk.** When free space drops
-  below a floor (default **10 GB**), Bandwatch reclaims space by deleting the
-  oldest continuous-archive segments first and — only if that is not enough —
-  event clips and log entries beyond the retention windows (**archive: 30 days,
-  events: 90 days**). If space still cannot be freed, it **stops recording and
-  logs a gap** rather than writing onto a full disk. Deletion is triggered
-  **only** by low disk space, so with ample free space nothing is removed; and
-  the event clips (the evidence) are always deleted **last**, after the archive.
-  These windows are conservative placeholders, not yet tuned to measured disk
-  usage — **back up your data if you are relying on it.**
+- Bandwatch records **short per-event clips**, not continuous audio — only the
+  moments that cross your threshold are kept.
+- **Data is deleted only to avoid filling the disk.** When free space drops
+  below a floor (default **10 GB**), Bandwatch reclaims space by deleting event
+  clips and log entries older than a retention window (default **90 days**); if
+  it still cannot free enough, it **stops recording and logs a gap** rather than
+  writing onto a full disk. Deletion is triggered **only** by low disk space, so
+  with ample free space nothing is removed. This window is a conservative
+  placeholder, not tuned to measured disk usage — **back up your data if you are
+  relying on it.**
 
 ## Choosing a Microphone
 
