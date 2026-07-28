@@ -1268,6 +1268,23 @@ private func healthyDiskStatus(freeBytes: Int64 = 50_000_000_000) -> RecordingSt
 }
 
 @MainActor
+@Test func testHealthyDiskPollNeverAlerts() {
+    // The complement of the once/re-arm tests: while the disk stays healthy,
+    // NO low-disk notification is ever posted, no matter how many 1 Hz polls
+    // arrive. Guards against a regression that alerts on every poll (or on any
+    // poll) regardless of disk level -- the "publishes regardless of disk
+    // level" test injects no notifier, so it cannot catch that on its own.
+    let notifier = FakeNotifier()
+    let s = MonitoringSession(notifier: notifier)
+
+    s.handleRecordingStatusPoll(healthyDiskStatus())
+    s.handleRecordingStatusPoll(healthyDiskStatus())
+    s.handleRecordingStatusPoll(healthyDiskStatus())
+
+    #expect(notifier.posts.isEmpty)
+}
+
+@MainActor
 @Test func testLowDiskNotifiesOnceThenSuppressesRepeatsWhileStillLow() {
     let notifier = FakeNotifier()
     let s = MonitoringSession(notifier: notifier)
