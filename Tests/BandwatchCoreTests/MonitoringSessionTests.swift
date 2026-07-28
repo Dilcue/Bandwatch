@@ -1162,7 +1162,10 @@ private func archiveHasAnyFile(atRoot root: URL) -> Bool {
     var t = 0.0
     for _ in 0..<20 { s.ingestForTesting(samples: loud, at: t); t += 0.05 }
 
-    try? await Task.sleep(for: .milliseconds(250))
+    // Wait for the 1 Hz status-poll task to publish a status, rather than
+    // sleeping a fixed interval: under full-suite CPU load the poll can take
+    // longer than any hard-coded delay, which is what made this test flaky.
+    await waitUntilTrue { s.recordingStatus != nil }
     #expect(s.recordingStatus != nil)
     #expect(s.recordingStatus?.currentSegment == nil)
 
