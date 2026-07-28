@@ -45,6 +45,18 @@ private func tempRoot() -> URL {
     #expect(p.diskWarningBytes == 10 * 1024 * 1024 * 1024)
 }
 
+@Test func testDefaultWarningSaturatesRatherThanOverflowingForAHugeFloor() {
+    // The default warning is 2x the floor. For a floor near Int64.max, `2 *
+    // floor` would overflow and TRAP -- so the init saturates to Int64.max
+    // instead. Several other tests (floor-stop, session/coordinator low-disk)
+    // construct `RetentionPolicy(diskFloorBytes: Int64.max)` and rely on this
+    // not trapping; pin the intent DIRECTLY here so a regression to a plain
+    // `2 * floor` fails as this one explicit case, not as a SIGTRAP buried in
+    // an unrelated test.
+    let p = RetentionPolicy(diskFloorBytes: Int64.max)
+    #expect(p.diskWarningBytes == Int64.max)
+}
+
 @Test func testIsLowOnDiskTrueWhenFreeIsBelowWarningButAboveFloor() {
     // Read the real free space on this volume once, then set a warning
     // threshold just above it (so isLowOnDisk() reports true) and a floor of
@@ -67,6 +79,22 @@ private func tempRoot() -> URL {
     let m = StorageManager(paths: RecordingPaths(root: tempRoot()),
                            policy: RetentionPolicy(diskWarningBytes: 0))
     #expect(m.isLowOnDisk() == false)
+}
+
+@Test func testIsLowOnDiskFailsClosedWhenFreeSpaceIndeterminate() {
+    // isLowOnDisk() carries the same fail-closed contract as isBelowFloor():
+    // an indeterminate free-space reading (freeBytes() == nil) is treated as
+    // low, not healthy -- an evidence tool must warn when the disk state is
+    // unknown, never go silent. As with the isBelowFloor() fail-closed test
+    // below, nil cannot be forced directly (freeBytes() probes an ancestor and
+    // the filesystem root always exists), so this uses an impossibly high
+    // warning threshold as a proxy: any real free space is "below" Int64.max,
+    // exercising the same `free < diskWarningBytes` verdict the nil branch
+    // short-circuits to. A true nil test would require injecting freeBytes(),
+    // which would decouple it from the ancestor-probe logic it must not.
+    let m = StorageManager(paths: RecordingPaths(root: tempRoot()),
+                           policy: RetentionPolicy(diskWarningBytes: Int64.max))
+    #expect(m.isLowOnDisk() == true)
 }
 
 @Test func testIsBelowFloorFailsClosedWhenFreeSpaceIndeterminate() {
