@@ -249,9 +249,6 @@ private struct RecordingRow: View {
                     .frame(width: 8, height: 8)
                 Text(indicatorText)
                     .foregroundStyle(Palette.primaryInk(scheme))
-                if let seg = status?.currentSegment {
-                    Text(seg).foregroundStyle(Palette.mutedInk(scheme))
-                }
                 Text("Clips: \(status?.eventsWritten ?? 0)")
                     .foregroundStyle(Palette.primaryInk(scheme))
                 if let free = status?.freeBytes {
@@ -277,15 +274,11 @@ private struct RecordingRow: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6))
             }
 
-            if let status, status.staleOpenGaps > 0 || status.discardedStubCount > 0
-                || status.droppedArchiveWindowCount > 0 {
-                // staleOpenGaps/discardedStubCount indicate lost/unaccounted-
-                // for coverage from BEFORE this run (a prior crash's
-                // unresolved gap, or archive segments too short to
-                // finalize); droppedArchiveWindowCount is THIS run's own
-                // disk-stall drops (I3) -- all three are amber rather than
-                // the red used for write failures above, since none is
-                // necessarily an ongoing failure at this instant.
+            if let status, status.staleOpenGaps > 0 {
+                // staleOpenGaps indicates lost/unaccounted-for coverage from
+                // BEFORE this run (a prior crash's unresolved gap) -- amber
+                // rather than the red used for write failures above, since
+                // it is not necessarily an ongoing failure at this instant.
                 Text(coverageWarningText(status))
                     .font(.callout)
                     .foregroundStyle(scheme == .dark ? .black : .white)
@@ -325,16 +318,6 @@ private struct RecordingRow: View {
         var parts: [String] = []
         if status.staleOpenGaps > 0 {
             parts.append("\(status.staleOpenGaps) unresolved coverage gap(s) from a previous run")
-        }
-        if status.discardedStubCount > 0 {
-            parts.append("\(status.discardedStubCount) archive segment(s) discarded, \(status.discardedFrames) frames lost")
-        }
-        if status.droppedArchiveWindowCount > 0 {
-            // A drop mid-segment, unlike a discarded stub, does not shrink
-            // `eventsWritten`/file count -- the archive file it landed in
-            // still exists and still opens, just with a splice a naive
-            // reader would not detect from the filename or duration alone.
-            parts.append("\(status.droppedArchiveWindowCount) archive window(s) dropped (disk stall)")
         }
         return parts.joined(separator: "; ")
     }

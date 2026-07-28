@@ -2,27 +2,9 @@ import Foundation
 
 public struct RecordingStatus: Equatable, Sendable {
     public let isRecording: Bool
-    public let currentSegment: String?
     public let eventsWritten: Int
     public let lastError: String?
     public let freeBytes: Int64?
-
-    /// Archive segments (and the frames inside them) that `SegmentWriter`
-    /// discarded because they never reached `SegmentWriter.minimumReadableFrames`
-    /// and so could not finalize into a readable FLAC stream. Mirrors
-    /// `SegmentWriter.discardedStubCount` / `discardedFrames`.
-    ///
-    /// Surfaced here rather than as a `gaps` row: `SegmentWriter` only
-    /// reports aggregate counts, not the wall-clock bounds of each discarded
-    /// stub, so there is no honest way to construct a dated gap for it —
-    /// inventing timestamps would itself be a fabrication in a database whose
-    /// entire purpose is being trustworthy. The counts are still real
-    /// information the operator needs, so they ride along on `status()`
-    /// instead of vanishing. (Contrast with `writeEventClip`'s too-short-clip
-    /// case below, where the caller supplies exact start/end timestamps, so a
-    /// real gap row can be logged honestly.)
-    public let discardedStubCount: Int
-    public let discardedFrames: Int
 
     /// Gaps still open (`ended_at IS NULL`) as measured once, at `init`, via
     /// `EventStore.openGaps()`. A gap left open by a crash in a previous
@@ -35,15 +17,14 @@ public struct RecordingStatus: Equatable, Sendable {
     /// unaccounted for.
     public let staleOpenGaps: Int
 
-    /// Cumulative counts of what `runRetention` has actually deleted over
-    /// this coordinator's lifetime. Exists so a retention loop that is
+    /// Cumulative count of event clips `runRetention` has actually deleted
+    /// over this coordinator's lifetime. Exists so a retention loop that is
     /// silently failing (e.g. every delete throwing) is visible as "0 and
     /// not climbing" rather than assumed to be working just because it ran.
-    public let archiveFilesDeleted: Int
     public let eventClipsDeleted: Int
 
-    /// Increments on every write failure (archive append, event clip write,
-    /// or event-row insert) and resets to zero on the next successful write.
+    /// Increments on every write failure (event clip write or event-row
+    /// insert) and resets to zero on the next successful write.
     /// `isRecording == true` only means a session is active, not that writes
     /// are succeeding — a full disk keeps `isRecording` true while every
     /// write fails. Unlike `lastError`, which any later message (including
@@ -51,58 +32,20 @@ public struct RecordingStatus: Equatable, Sendable {
     /// UI can trust at a glance.
     public let consecutiveWriteFailures: Int
 
-    /// Windows of filtered archive audio dropped because the bounded
-    /// archive-delivery stream's buffer was full (a stalled disk) --
-    /// mirrors `discardedStubCount`/`discardedFrames` above in being real,
-    /// lost coverage that must be visible rather than silently counted and
-    /// never read. Tracked session-side (in `MonitoringSession`, on the
-    /// synchronous analysis path where the drop actually happens, before
-    /// any audio would reach this actor) and merged into the status this
-    /// coordinator reports -- see `MonitoringSession`'s status-polling task
-    /// and `withDroppedArchiveWindowCount(_:)` below. Each drop also opens
-    /// an `.archiveWindowDropped` gap (`RecordingCoordinator.noteArchiveWindowDropped`)
-    /// so the discontinuity is recorded in the database, not just counted
-    /// here.
-    public let droppedArchiveWindowCount: Int
-
     public init(isRecording: Bool,
-                currentSegment: String?,
                 eventsWritten: Int,
                 lastError: String?,
                 freeBytes: Int64?,
-                discardedStubCount: Int = 0,
-                discardedFrames: Int = 0,
                 staleOpenGaps: Int = 0,
-                archiveFilesDeleted: Int = 0,
                 eventClipsDeleted: Int = 0,
-                consecutiveWriteFailures: Int = 0,
-                droppedArchiveWindowCount: Int = 0) {
+                consecutiveWriteFailures: Int = 0) {
         self.isRecording = isRecording
-        self.currentSegment = currentSegment
         self.eventsWritten = eventsWritten
         self.lastError = lastError
         self.freeBytes = freeBytes
-        self.discardedStubCount = discardedStubCount
-        self.discardedFrames = discardedFrames
         self.staleOpenGaps = staleOpenGaps
-        self.archiveFilesDeleted = archiveFilesDeleted
         self.eventClipsDeleted = eventClipsDeleted
         self.consecutiveWriteFailures = consecutiveWriteFailures
-        self.droppedArchiveWindowCount = droppedArchiveWindowCount
-    }
-
-    /// Returns a copy with `droppedArchiveWindowCount` replaced. See that
-    /// property's doc comment for why this is merged in by the caller
-    /// (`MonitoringSession`) rather than tracked inside this struct's own
-    /// producer, `RecordingCoordinator.status()`.
-    public func withDroppedArchiveWindowCount(_ count: Int) -> RecordingStatus {
-        RecordingStatus(isRecording: isRecording, currentSegment: currentSegment,
-                        eventsWritten: eventsWritten, lastError: lastError, freeBytes: freeBytes,
-                        discardedStubCount: discardedStubCount, discardedFrames: discardedFrames,
-                        staleOpenGaps: staleOpenGaps, archiveFilesDeleted: archiveFilesDeleted,
-                        eventClipsDeleted: eventClipsDeleted,
-                        consecutiveWriteFailures: consecutiveWriteFailures,
-                        droppedArchiveWindowCount: count)
     }
 }
 
@@ -110,8 +53,8 @@ public struct RecordingStatus: Equatable, Sendable {
 /// happens inside this actor.
 ///
 /// Analysis stays on the main actor and hands audio across as `[Float]`,
-/// which is `Sendable`. `AVAudioFile` (via `FLACWriter`/`SegmentWriter`) and
-/// `EventStore` are not `Sendable` and never leave this actor.
+/// which is `Sendable`. `AVAudioFile` (via `FLACWriter`) and `EventStore` are
+/// not `Sendable` and never leave this actor.
 ///
 /// Write errors are deliberately NOT thrown back to the caller: a failed
 /// write must never stop analysis or capture. Instead a gap row is recorded
@@ -122,8 +65,13 @@ public struct RecordingStatus: Equatable, Sendable {
 public actor RecordingCoordinator {
     private let paths: RecordingPaths
     private let sampleRate: Double
-    private let segments: SegmentWriter
     private let storage: StorageManager
+
+    /// A FLAC file below this length never finalizes into a readable stream,
+    /// even with a correct close(). Verified empirically while building
+    /// `FLACWriter`. Anything shorter is a stub, not a recording, and must
+    /// not be presented as one.
+    static let minimumReadableFrames = 4608
 
     private let store: EventStore
 
@@ -144,8 +92,6 @@ public actor RecordingCoordinator {
     /// `heartbeatSpan` and finalized in `stop()`. Only one span is open per session.
     private var currentSpanID: Int64?
 
-    private var lastReportedDiscardedStubCount = 0
-    private var archiveFilesDeleted = 0
     private var eventClipsDeleted = 0
     private var consecutiveWriteFailures = 0
 
@@ -156,12 +102,9 @@ public actor RecordingCoordinator {
     public init(paths: RecordingPaths,
                 sampleRate: Double,
                 policy: RetentionPolicy = RetentionPolicy(),
-                segmentDuration: TimeInterval = SegmentWriter.defaultSegmentDuration,
                 resolveGapsOpenedBefore: Date = .distantPast) throws {
         self.paths = paths
         self.sampleRate = sampleRate
-        self.segments = SegmentWriter(paths: paths, sampleRate: sampleRate,
-                                      segmentDuration: segmentDuration)
         self.storage = StorageManager(paths: paths, policy: policy)
         self.store = try EventStore(url: paths.databaseURL)
         // Close any gaps a PRIOR run left open (a crash orphans them with no end
@@ -206,16 +149,14 @@ public actor RecordingCoordinator {
         }
     }
 
-    /// Stops the current recording session: closes the in-progress archive
-    /// segment and any open gaps, but deliberately leaves the database open.
-    /// A Stop→Start cycle is a normal, expected UI action within one running
-    /// process, and must not silently disable all future event/gap logging —
-    /// only `shutdown()` (final teardown) closes the store. Idempotent: a
-    /// second call, or a call with no prior `start()`, is a no-op.
+    /// Stops the current recording session: closes any open gaps, but
+    /// deliberately leaves the database open. A Stop→Start cycle is a
+    /// normal, expected UI action within one running process, and must not
+    /// silently disable all future event/gap logging — only `shutdown()`
+    /// (final teardown) closes the store. Idempotent: a second call, or a
+    /// call with no prior `start()`, is a no-op.
     public func stop(at date: Date = Date()) {
         guard recording else { return }
-        segments.closeCurrent()
-        noteDiscardedStubsIfChanged()
         closeOpenGaps(at: date)
         if let id = currentSpanID {
             do { try store.updateSpanEnd(id: id, endedAt: date) }
@@ -225,10 +166,9 @@ public actor RecordingCoordinator {
         recording = false
     }
 
-    /// Final teardown: stops any in-progress session (closing the segment
-    /// and any open gaps first, preserving the existing ordering guarantee)
-    /// and then closes the database. The coordinator must not be used again
-    /// afterwards.
+    /// Final teardown: stops any in-progress session (closing any open gaps
+    /// first, preserving the existing ordering guarantee) and then closes
+    /// the database. The coordinator must not be used again afterwards.
     ///
     /// This is the *only* way the database gets closed — callers are
     /// expected to call it when they are done with a coordinator. There is
@@ -253,33 +193,21 @@ public actor RecordingCoordinator {
         store.close()
     }
 
-    public func appendArchive(_ samples: [Float], wallClock: Date) {
-        guard recording else { return }
-        do {
-            try segments.append(samples, wallClock: wallClock)
-            noteDiscardedStubsIfChanged()
-            recordWriteSuccess()
-        } catch {
-            recordWriteFailure(error, at: wallClock)
-        }
-    }
-
     /// Writes one event clip and logs its metadata row.
     ///
-    /// A clip whose frame count is below `SegmentWriter.minimumReadableFrames`
-    /// is never written to disk: a FLAC stream that short cannot finalize
-    /// into anything openable (verified in `SegmentWriterTests` /
-    /// `FLACWriterTests`), so writing it would leave an unopenable file on
-    /// disk that the database claims is a recording — worse than not writing
-    /// it at all. The detection itself is still real evidence (peak/mean
-    /// level, duration, band, threshold), so the event row is still inserted
-    /// and counted; `clipPath` records where a clip would have lived so the
+    /// A clip whose frame count is below `minimumReadableFrames` is never
+    /// written to disk: a FLAC stream that short cannot finalize into
+    /// anything openable (verified empirically while building `FLACWriter`),
+    /// so writing it would leave an unopenable file on disk that the
+    /// database claims is a recording — worse than not writing it at all.
+    /// The detection itself is still real evidence (peak/mean level,
+    /// duration, band, threshold), so the event row is still inserted and
+    /// counted; `clipPath` records where a clip would have lived so the
     /// missing audio is visible on inspection (`FileManager.fileExists` on it
     /// returns false) rather than silently implied to exist. A `.writeFailure`
     /// gap spanning the event's own start/duration is also logged, because we
-    /// know its exact bounds here (unlike the archive-stub case above) and it
-    /// is exactly the situation gaps exist to record: an interval with no
-    /// readable recorded audio.
+    /// know its exact bounds here, and it is exactly the situation gaps
+    /// exist to record: an interval with no readable recorded audio.
     ///
     /// - Parameters:
     ///   - eventStartWallClock: When the NOISE itself began — the moment the
@@ -305,12 +233,11 @@ public actor RecordingCoordinator {
             // it must not vanish with no trace. There's no live session to
             // insert an event ROW against (no deviceUID, no open-session
             // semantics), but the interval itself is fully known
-            // (eventStartWallClock + duration), so unlike the archive-stub
-            // case above, a real gap CAN be logged honestly here -- e.g. a
-            // caller that raced this actor's own `stop()` (which flips
-            // `recording` false) between assembling a clip and awaiting
-            // this call. Without it, that interval would have no
-            // explanation anywhere in the database.
+            // (eventStartWallClock + duration), so a real gap CAN be logged
+            // honestly here -- e.g. a caller that raced this actor's own
+            // `stop()` (which flips `recording` false) between assembling a
+            // clip and awaiting this call. Without it, that interval would
+            // have no explanation anywhere in the database.
             lastError = "event dropped: not recording (start=\(eventStartWallClock), " +
                 "duration=\(event.duration)s)"
             logCompletedInterval(reason: .writeFailure, start: eventStartWallClock,
@@ -319,9 +246,9 @@ public actor RecordingCoordinator {
         }
         let url = paths.eventClipURL(startingAt: clipStartWallClock)
 
-        guard samples.count >= SegmentWriter.minimumReadableFrames else {
+        guard samples.count >= Self.minimumReadableFrames else {
             lastError = "event clip too short to write (\(samples.count) frames < " +
-                "\(SegmentWriter.minimumReadableFrames)): \(url.lastPathComponent)"
+                "\(Self.minimumReadableFrames)): \(url.lastPathComponent)"
             insertEventRow(event: event, startWallClock: eventStartWallClock, band: band,
                           thresholdDBFS: thresholdDBFS, clipPath: url.path)
             logCompletedInterval(reason: .writeFailure, start: eventStartWallClock,
@@ -338,26 +265,6 @@ public actor RecordingCoordinator {
         } catch {
             recordWriteFailure(error, at: eventStartWallClock)
         }
-    }
-
-    /// Records that `MonitoringSession` had to drop one window of filtered
-    /// archive audio because its bounded delivery stream's buffer was full
-    /// (a stalled disk) -- see `RecordingStatus.droppedArchiveWindowCount`.
-    /// A dropped window means the NEXT window successfully delivered will
-    /// be spliced onto the archive file as if it were continuous, which it
-    /// is not, so this opens an `.archiveWindowDropped` gap recording that
-    /// the discontinuity happened, even though (unlike `writeEventClip`'s
-    /// short-clip case) the exact start/end of the missing audio is not
-    /// known here -- only that a drop occurred at `date`. Like
-    /// `.writeFailure`, this is left open (not immediately closed) because
-    /// a stall is an ongoing condition, not a bounded interval with a known
-    /// end; `stop()`/`shutdown()` closes it along with every other
-    /// still-open gap once the session actually ends. Repeat drops during
-    /// one stall dedupe to the single already-open row via the usual
-    /// per-reason mechanism in `openGap`, so a sustained stall does not
-    /// grow the gaps table once per dropped window.
-    public func noteArchiveWindowDropped(at date: Date) {
-        openGap(reason: .archiveWindowDropped, at: date)
     }
 
     /// Opens a gap for `reason`, unless one is already open for that same
@@ -424,29 +331,24 @@ public actor RecordingCoordinator {
 
     public func status() -> RecordingStatus {
         RecordingStatus(isRecording: recording,
-                        currentSegment: segments.currentURL?.lastPathComponent,
                         eventsWritten: eventsWritten,
                         lastError: lastError,
                         freeBytes: storage.freeBytes(),
-                        discardedStubCount: segments.discardedStubCount,
-                        discardedFrames: segments.discardedFrames,
                         staleOpenGaps: staleOpenGaps,
-                        archiveFilesDeleted: archiveFilesDeleted,
                         eventClipsDeleted: eventClipsDeleted,
                         consecutiveWriteFailures: consecutiveWriteFailures)
     }
 
     /// Applies retention. Failures are recorded in `lastError` rather than
     /// swallowed with `try?`, and what was actually deleted is accumulated
-    /// into `archiveFilesDeleted`/`eventClipsDeleted` so a silently-failing
-    /// retention loop (disk filling while counts stay flat) is visible
-    /// through `status()` instead of assumed to be working.
+    /// into `eventClipsDeleted` so a silently-failing retention loop (disk
+    /// filling while the count stays flat) is visible through `status()`
+    /// instead of assumed to be working.
     public func runRetention(now: Date) {
-        let result = storage.applyRetention(now: now)
-        archiveFilesDeleted += result.archiveDeleted.count
+        let cutoffForEvents = storage.applyRetention(now: now)
 
         do {
-            let deletedPaths = try store.deleteEvents(olderThan: result.cutoffForEvents)
+            let deletedPaths = try store.deleteEvents(olderThan: cutoffForEvents)
             eventClipsDeleted += deletedPaths.count
             for p in deletedPaths {
                 do {
@@ -499,7 +401,7 @@ public actor RecordingCoordinator {
     }
 
     /// Resets the consecutive-write-failure streak. Called after any write
-    /// (archive append or event-row insert) that actually succeeds.
+    /// (event-row insert) that actually succeeds.
     private func recordWriteSuccess() {
         consecutiveWriteFailures = 0
     }
@@ -514,16 +416,10 @@ public actor RecordingCoordinator {
     /// honestly recording the interval from the floor breach to the moment
     /// recording actually stopped.
     ///
-    /// This used to run inline from `appendArchive`, keyed on frames of
-    /// archive audio actually written. With the continuous archive now
-    /// flag-disabled by default (`MonitoringSession.isContinuousArchiveEnabled`),
-    /// `appendArchive` may never be called at all in a given session, and the
-    /// floor would then never be enforced for its entire lifetime — silently
-    /// dropping the one guarantee `StorageManager` depends on its caller for.
-    /// So this is now `public` and driven externally: `MonitoringSession`'s
-    /// 1 Hz recording-status poll calls it directly and unconditionally,
-    /// independent of whether the archive is running, which is what keeps
-    /// enforcement working with the archive on OR off.
+    /// `public` and driven externally: `MonitoringSession`'s 1 Hz
+    /// recording-status poll calls it directly and unconditionally, since
+    /// this coordinator has no periodic tick of its own to hang the check
+    /// on.
     public func enforceStorageFloor(at date: Date) {
         guard recording else { return }
         guard storage.isBelowFloor() else { return }
@@ -547,13 +443,5 @@ public actor RecordingCoordinator {
         } catch {
             lastError = "gap log failed: \(error)"
         }
-    }
-
-    private func noteDiscardedStubsIfChanged() {
-        let count = segments.discardedStubCount
-        guard count != lastReportedDiscardedStubCount else { return }
-        lastReportedDiscardedStubCount = count
-        lastError = "\(count) archive segment(s) discarded as too short to finalize " +
-            "(\(segments.discardedFrames) frames lost)"
     }
 }

@@ -11,7 +11,6 @@ private func makeDate(_ iso: String) -> Date {
 private let paths = RecordingPaths(root: URL(fileURLWithPath: "/tmp/bwtest"))
 
 @Test func testDirectoryLayout() {
-    #expect(paths.archiveDirectory.path == "/tmp/bwtest/archive")
     #expect(paths.eventsDirectory.path == "/tmp/bwtest/events")
     #expect(paths.databaseURL.lastPathComponent == "bandwatch.sqlite")
 }
@@ -23,33 +22,26 @@ private let paths = RecordingPaths(root: URL(fileURLWithPath: "/tmp/bwtest"))
     #expect(name.contains("T"))
 }
 
-@Test func testArchiveSegmentURLShape() {
-    let d = makeDate("2026-07-20T22:00:00Z")
-    let url = paths.archiveSegmentURL(startingAt: d)
-    #expect(url.pathExtension == "flac")
-    #expect(url.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent == "archive")
-    // day directory sits between archive/ and the file
-    let day = url.deletingLastPathComponent().lastPathComponent
-    #expect(day.count == 10)          // yyyy-MM-dd
-    #expect(day.filter { $0 == "-" }.count == 2)
-}
-
 @Test func testEventClipURLShape() {
     let d = makeDate("2026-07-20T23:41:07Z")
     let url = paths.eventClipURL(startingAt: d)
     #expect(url.pathExtension == "flac")
     #expect(url.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent == "events")
+    // day directory sits between events/ and the file
+    let day = url.deletingLastPathComponent().lastPathComponent
+    #expect(day.count == 10)          // yyyy-MM-dd
+    #expect(day.filter { $0 == "-" }.count == 2)
 }
 
 @Test func testDayDirectoryGroupsSameDayTogether() {
-    let a = paths.archiveSegmentURL(startingAt: makeDate("2026-07-20T22:00:00Z"))
-    let b = paths.archiveSegmentURL(startingAt: makeDate("2026-07-20T23:00:00Z"))
+    let a = paths.eventClipURL(startingAt: makeDate("2026-07-20T22:00:00Z"))
+    let b = paths.eventClipURL(startingAt: makeDate("2026-07-20T23:00:00Z"))
     #expect(a.deletingLastPathComponent() == b.deletingLastPathComponent())
 }
 
 @Test func testDistinctTimesProduceDistinctFiles() {
-    let a = paths.archiveSegmentURL(startingAt: makeDate("2026-07-20T22:00:00Z"))
-    let b = paths.archiveSegmentURL(startingAt: makeDate("2026-07-20T23:00:00Z"))
+    let a = paths.eventClipURL(startingAt: makeDate("2026-07-20T22:00:00Z"))
+    let b = paths.eventClipURL(startingAt: makeDate("2026-07-20T23:00:00Z"))
     #expect(a != b)
 }
 
@@ -62,10 +54,6 @@ private let paths = RecordingPaths(root: URL(fileURLWithPath: "/tmp/bwtest"))
 @Test func testMillisecondApartDatesProduceDistinctURLs() {
     let a = makeDate("2026-07-20T23:41:07Z")
     let b = a.addingTimeInterval(0.001)
-
-    let archiveA = paths.archiveSegmentURL(startingAt: a)
-    let archiveB = paths.archiveSegmentURL(startingAt: b)
-    #expect(archiveA != archiveB)
 
     let eventA = paths.eventClipURL(startingAt: a)
     let eventB = paths.eventClipURL(startingAt: b)
@@ -106,7 +94,7 @@ private let paths = RecordingPaths(root: URL(fileURLWithPath: "/tmp/bwtest"))
     #expect(nameA.hasSuffix("-0400"))
     #expect(nameB.hasSuffix("-0500"))
 
-    let urlA = nyPaths.archiveSegmentURL(startingAt: a)
-    let urlB = nyPaths.archiveSegmentURL(startingAt: b)
+    let urlA = nyPaths.eventClipURL(startingAt: a)
+    let urlB = nyPaths.eventClipURL(startingAt: b)
     #expect(urlA != urlB)
 }

@@ -59,16 +59,15 @@ struct BandwatchApp: App {
 
 /// Owns the one `MonitoringSession` and makes sure quitting — through ANY
 /// route (this menu's Quit item, Cmd-Q, the Dock's Quit, or logout, all of
-/// which end up calling `NSApplication.terminate(_:)`) — cannot leave the
-/// in-progress archive segment corrupted on disk (C1).
+/// which end up calling `NSApplication.terminate(_:)`) — cannot leave an
+/// in-progress event clip corrupted on disk (C1).
 ///
 /// The bug this fixes: process termination does not run `deinit`, and a
 /// FLAC file is unreadable until its writer is explicitly closed (verified
 /// empirically — see the M3 review). With no delegate, nothing ever called
-/// `session.stop()`/the coordinator's `shutdown()` on the quit path, so
-/// EVERY quit corrupted whatever archive segment was currently open — up to
-/// 60 minutes of audio, unopenable, with no gap row explaining the missing
-/// coverage either.
+/// `session.stop()`/the coordinator's `shutdown()` on the quit path, so a
+/// quit landing mid-write could corrupt whatever event clip was in
+/// progress, with no gap row explaining the missing coverage either.
 ///
 /// `applicationWillTerminate` is NOT the right hook for this, even though
 /// it is the first one that comes to mind: it runs synchronously on the
@@ -85,8 +84,8 @@ struct BandwatchApp: App {
 /// `NSApplication.reply(toApplicationShouldTerminate:)` once it is safe to
 /// proceed. This is what actually blocks the process from exiting until
 /// `session.shutdown()` — which awaits the coordinator all the way through
-/// closing the segment's writer and the database (see its doc comment) —
-/// has genuinely finished.
+/// writing any in-progress event clip and closing the database (see its
+/// doc comment) — has genuinely finished.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     // Shared notification client (Task 4): `session` uses it for blocked

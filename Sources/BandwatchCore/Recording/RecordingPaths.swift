@@ -12,7 +12,6 @@ public struct RecordingPaths: Sendable {
         self.timeZone = timeZone
     }
 
-    public var archiveDirectory: URL { root.appendingPathComponent("archive") }
     public var eventsDirectory: URL { root.appendingPathComponent("events") }
     public var databaseURL: URL { root.appendingPathComponent("bandwatch.sqlite") }
 
@@ -52,12 +51,6 @@ public struct RecordingPaths: Sendable {
     /// loss bug (same-second overwrite) and a DST ambiguity bug.
     public func timestampName(for date: Date) -> String {
         Self.makeStampFormatter(timeZone: timeZone).string(from: date)
-    }
-
-    public func archiveSegmentURL(startingAt date: Date) -> URL {
-        archiveDirectory
-            .appendingPathComponent(dayDirectoryName(for: date))
-            .appendingPathComponent(timestampName(for: date) + ".flac")
     }
 
     public func eventClipURL(startingAt date: Date) -> URL {

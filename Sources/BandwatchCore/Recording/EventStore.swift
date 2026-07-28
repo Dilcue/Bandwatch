@@ -219,7 +219,7 @@ public final class EventStore {
     /// - Parameter clipPath: The location a clip would live at, not a
     ///   promise that a file exists there. A detection is real evidence even
     ///   when its clip is too short to write (see
-    ///   `SegmentWriter.minimumReadableFrames`), so `RecordingCoordinator`
+    ///   `RecordingCoordinator.minimumReadableFrames`), so `RecordingCoordinator`
     ///   still inserts a row for it — `clip_path` records the expected
     ///   location so the gap is visible on inspection
     ///   (`FileManager.fileExists` returns false) rather than silently

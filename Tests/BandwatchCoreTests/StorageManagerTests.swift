@@ -9,16 +9,8 @@ private func tempRoot() -> URL {
     return d
 }
 
-private func writeFile(_ url: URL, modified: Date) {
-    try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
-                                             withIntermediateDirectories: true)
-    FileManager.default.createFile(atPath: url.path, contents: Data([1, 2, 3]))
-    try? FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: url.path)
-}
-
 @Test func testDefaultPolicyMatchesSpec() {
     let p = RetentionPolicy()
-    #expect(p.archiveDays == 30)
     #expect(p.eventDays == 90)
     #expect(p.diskFloorBytes == 10 * 1024 * 1024 * 1024)
 }
@@ -30,60 +22,14 @@ private func writeFile(_ url: URL, modified: Date) {
     #expect((free ?? 0) > 0)
 }
 
-@Test func testFindsArchiveFilesOlderThanCutoff() {
+@Test func testApplyRetentionReturnsEventCutoff() {
     let root = tempRoot()
     let paths = RecordingPaths(root: root)
-    let m = StorageManager(paths: paths)
+    let m = StorageManager(paths: paths, policy: RetentionPolicy(eventDays: 90, diskFloorBytes: 0))
     let now = Date()
-    writeFile(paths.archiveDirectory.appendingPathComponent("2026-01-01/old.flac"),
-              modified: now.addingTimeInterval(-100_000))
-    writeFile(paths.archiveDirectory.appendingPathComponent("2026-07-20/new.flac"),
-              modified: now)
-    let old = m.archiveFilesOlderThan(now.addingTimeInterval(-1000))
-    #expect(old.count == 1)
-    #expect(old[0].lastPathComponent == "old.flac")
-}
-
-@Test func testDeletesOldestArchiveFilesFirst() {
-    let root = tempRoot()
-    let paths = RecordingPaths(root: root)
-    let m = StorageManager(paths: paths)
-    let now = Date()
-    for (i, name) in ["a", "b", "c"].enumerated() {
-        writeFile(paths.archiveDirectory.appendingPathComponent("d/\(name).flac"),
-                  modified: now.addingTimeInterval(Double(i) * -10_000))
-    }
-    // c is oldest (-20000), then b (-10000), then a (0)
-    let deleted = m.deleteOldestArchiveFiles(count: 2)
-    #expect(deleted.count == 2)
-    #expect(Set(deleted.map { $0.lastPathComponent }) == Set(["c.flac", "b.flac"]))
-    #expect(!FileManager.default.fileExists(atPath: deleted[0].path))
-    #expect(FileManager.default.fileExists(
-        atPath: paths.archiveDirectory.appendingPathComponent("d/a.flac").path))
-}
-
-@Test func testApplyRetentionDeletesBeyondArchiveWindow() {
-    let root = tempRoot()
-    let paths = RecordingPaths(root: root)
-    let m = StorageManager(paths: paths, policy: RetentionPolicy(archiveDays: 30,
-                                                                 eventDays: 90,
-                                                                 diskFloorBytes: 0))
-    let now = Date()
-    writeFile(paths.archiveDirectory.appendingPathComponent("x/keep.flac"),
-              modified: now.addingTimeInterval(-10 * 86400))
-    writeFile(paths.archiveDirectory.appendingPathComponent("x/drop.flac"),
-              modified: now.addingTimeInterval(-40 * 86400))
-    let result = m.applyRetention(now: now)
-    #expect(result.archiveDeleted.count == 1)
-    #expect(result.archiveDeleted[0].lastPathComponent == "drop.flac")
+    let cutoffForEvents = m.applyRetention(now: now)
     // Event cutoff is 90 days back
-    #expect(abs(result.cutoffForEvents.timeIntervalSince(now.addingTimeInterval(-90 * 86400))) < 1)
-}
-
-@Test func testDeleteOnEmptyArchiveIsSafe() {
-    let m = StorageManager(paths: RecordingPaths(root: tempRoot()))
-    #expect(m.deleteOldestArchiveFiles(count: 5).isEmpty)
-    #expect(m.archiveFilesOlderThan(Date()).isEmpty)
+    #expect(abs(cutoffForEvents.timeIntervalSince(now.addingTimeInterval(-90 * 86400))) < 1)
 }
 
 @Test func testFreeSpaceReportedForNonExistentRoot() {

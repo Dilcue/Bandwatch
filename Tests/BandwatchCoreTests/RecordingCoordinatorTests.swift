@@ -18,31 +18,6 @@ private func block(_ n: Int, _ v: Float = 0.1) -> [Float] { [Float](repeating: v
     await c.stop()
 }
 
-// Scaled up from the brief's original (sampleRate 100, 10 blocks of 100 =
-// 1000 frames total): SegmentWriter now discards any segment below
-// `minimumReadableFrames` (4608) as an unreadable stub on close (see
-// SegmentWriterTests.testStubSegmentBelowMinimumReadableFramesIsDeletedOnClose),
-// so 1000 frames would be silently deleted by stop() and `files.count == 1`
-// could never hold. 10 blocks of 500 (5000 frames total) clears the
-// threshold while segmentDuration (100s => 10,000 frames/segment at this
-// sample rate) still guarantees no rollover, preserving the test's original
-// intent: one segment, closed and readable after stop().
-@Test func testArchiveSegmentIsWrittenAndReadableAfterStop() async throws {
-    let p = tempPaths()
-    let c = try RecordingCoordinator(paths: p, sampleRate: 100,
-                                     segmentDuration: 100)  // large, no rollover
-    await c.start(deviceUID: "DEV")
-    for _ in 0..<10 { await c.appendArchive(block(500), wallClock: Date()) }
-    await c.stop()
-
-    let files = try FileManager.default.subpathsOfDirectory(atPath: p.archiveDirectory.path)
-        .filter { $0.hasSuffix(".flac") }
-    #expect(files.count == 1)
-    let url = p.archiveDirectory.appendingPathComponent(files[0])
-    let f = try AVAudioFile(forReading: url)   // readable because stop() closed it
-    #expect(f.length == 5000)
-}
-
 @Test func testEventClipIsWrittenAndLogged() async throws {
     let p = tempPaths()
     let c = try RecordingCoordinator(paths: p, sampleRate: 44100)
@@ -104,14 +79,13 @@ private func block(_ n: Int, _ v: Float = 0.1) -> [Float] { [Float](repeating: v
     s.close()
 }
 
-@Test func testStatusReportsSegmentAndCount() async throws {
+@Test func testStatusReportsEventCount() async throws {
     let p = tempPaths()
-    let c = try RecordingCoordinator(paths: p, sampleRate: 100, segmentDuration: 100)
+    let c = try RecordingCoordinator(paths: p, sampleRate: 100)
     await c.start(deviceUID: "D")
-    await c.appendArchive(block(100), wallClock: Date())
     var s = await c.status()
     #expect(s.isRecording)
-    #expect(s.currentSegment != nil)
+    #expect(s.eventsWritten == 0)
 
     let ev = DetectedEvent(startTime: 0, duration: 1, peakDBFS: -5, meanDBFS: -10)
     await c.writeEventClip(samples: block(100), event: ev, eventStartWallClock: Date(), clipStartWallClock: Date(),
@@ -121,19 +95,9 @@ private func block(_ n: Int, _ v: Float = 0.1) -> [Float] { [Float](repeating: v
     await c.stop()
 }
 
-@Test func testAppendBeforeStartIsIgnored() async throws {
-    let p = tempPaths()
-    let c = try RecordingCoordinator(paths: p, sampleRate: 100, segmentDuration: 100)
-    await c.appendArchive(block(100), wallClock: Date())   // not started
-    let s = await c.status()
-    #expect(s.isRecording == false)
-    #expect(s.currentSegment == nil)
-    await c.stop()
-}
-
 // MARK: - Constraints beyond the brief
 
-// A clip shorter than SegmentWriter.minimumReadableFrames must not be
+// A clip shorter than RecordingCoordinator.minimumReadableFrames must not be
 // written to disk (it would never open), but the detection is still real
 // evidence, so the event row is still logged, and clipPath points to a
 // location where no file exists.
@@ -142,7 +106,7 @@ private func block(_ n: Int, _ v: Float = 0.1) -> [Float] { [Float](repeating: v
     let c = try RecordingCoordinator(paths: p, sampleRate: 44100)
     await c.start(deviceUID: "D")
     let ev = DetectedEvent(startTime: 0, duration: 0.05, peakDBFS: -3, meanDBFS: -9)
-    let shortSamples = block(SegmentWriter.minimumReadableFrames - 1)
+    let shortSamples = block(RecordingCoordinator.minimumReadableFrames - 1)
     await c.writeEventClip(samples: shortSamples, event: ev, eventStartWallClock: Date(), clipStartWallClock: Date(),
                            band: .bassSubwoofer, thresholdDBFS: -40)
     let status = await c.status()
@@ -159,14 +123,14 @@ private func block(_ n: Int, _ v: Float = 0.1) -> [Float] { [Float](repeating: v
 }
 
 // The skipped clip's interval is logged as a gap with real start/end
-// timestamps derived from the event itself, since (unlike discarded archive
-// stubs) those bounds are known exactly here.
+// timestamps derived from the event itself, since those bounds are known
+// exactly here.
 @Test func testShortEventClipLogsAWriteFailureGap() async throws {
     let p = tempPaths()
     let c = try RecordingCoordinator(paths: p, sampleRate: 44100)
     await c.start(deviceUID: "D")
     let ev = DetectedEvent(startTime: 0, duration: 0.05, peakDBFS: -3, meanDBFS: -9)
-    let shortSamples = block(SegmentWriter.minimumReadableFrames - 1)
+    let shortSamples = block(RecordingCoordinator.minimumReadableFrames - 1)
     await c.writeEventClip(samples: shortSamples, event: ev, eventStartWallClock: Date(), clipStartWallClock: Date(),
                            band: .bassSubwoofer, thresholdDBFS: -40)
     await c.stop()
@@ -184,7 +148,7 @@ private func block(_ n: Int, _ v: Float = 0.1) -> [Float] { [Float](repeating: v
     let c = try RecordingCoordinator(paths: p, sampleRate: 44100)
     await c.start(deviceUID: "D")
     let ev = DetectedEvent(startTime: 0, duration: 0.1, peakDBFS: -3, meanDBFS: -9)
-    await c.writeEventClip(samples: block(SegmentWriter.minimumReadableFrames), event: ev,
+    await c.writeEventClip(samples: block(RecordingCoordinator.minimumReadableFrames), event: ev,
                            eventStartWallClock: Date(), clipStartWallClock: Date(), band: .bassSubwoofer, thresholdDBFS: -40)
     await c.stop()
 
@@ -263,11 +227,10 @@ private func block(_ n: Int, _ v: Float = 0.1) -> [Float] { [Float](repeating: v
 }
 
 // I4: recovering from one condition must not falsely close a DIFFERENT
-// still-open gap. `.writeFailure` opens on any failed append (which happen
-// ~21.5/sec in real use), so co-occurrence with e.g. `.noSignal` is
-// unremarkable, not exotic -- closing it just because .noSignal recovered
-// would record a false `ended_at` in the table whose purpose is proving
-// coverage.
+// still-open gap. `.writeFailure` can open independently of `.noSignal`, so
+// co-occurrence with it is unremarkable, not exotic -- closing it just
+// because .noSignal recovered would record a false `ended_at` in the table
+// whose purpose is proving coverage.
 @Test func testCloseGapClosesOnlyThatReasonsGap() async throws {
     let p = tempPaths()
     let c = try RecordingCoordinator(paths: p, sampleRate: 44100)
@@ -292,17 +255,21 @@ private func block(_ n: Int, _ v: Float = 0.1) -> [Float] { [Float](repeating: v
 }
 
 // I6: force a genuine I/O failure deterministically by putting a regular
-// file where archiveDirectory (a directory) must go, so FLACWriter's
+// file where eventsDirectory (a directory) must go, so FLACWriter's
 // createDirectory fails for real. The headline guarantee: a failed write
 // does not throw, and does record a gap.
 @Test func testGenuineWriteFailureDoesNotThrowAndRecordsGapAndFailureCount() async throws {
     let p = tempPaths()
     try FileManager.default.createDirectory(at: p.root, withIntermediateDirectories: true)
-    FileManager.default.createFile(atPath: p.archiveDirectory.path, contents: Data())
+    FileManager.default.createFile(atPath: p.eventsDirectory.path, contents: Data())
 
     let c = try RecordingCoordinator(paths: p, sampleRate: 44100)
     await c.start(deviceUID: "D")
-    await c.appendArchive(block(1000), wallClock: Date())   // must not throw
+    let ev = DetectedEvent(startTime: 0, duration: 1.0, peakDBFS: -6, meanDBFS: -12)
+    // must not throw
+    await c.writeEventClip(samples: block(RecordingCoordinator.minimumReadableFrames), event: ev,
+                           eventStartWallClock: Date(), clipStartWallClock: Date(),
+                           band: .bassSubwoofer, thresholdDBFS: -40)
 
     let s1 = await c.status()
     #expect(s1.consecutiveWriteFailures > 0)
@@ -344,47 +311,11 @@ private func block(_ n: Int, _ v: Float = 0.1) -> [Float] { [Float](repeating: v
     s.close()
 }
 
-// I3: a dropped archive window (the bounded delivery stream's buffer was
-// full, upstream of this actor) must open a gap recording the discontinuity,
-// not just increment a counter nothing reads.
-@Test func testDroppedArchiveWindowOpensAGap() async throws {
-    let p = tempPaths()
-    let c = try RecordingCoordinator(paths: p, sampleRate: 44100)
-    await c.start(deviceUID: "D")
-    await c.noteArchiveWindowDropped(at: Date())
-    await c.stop()
-    await c.shutdown()
-
-    let s = try EventStore(url: p.databaseURL)
-    let gaps = try s.allGaps()
-    #expect(gaps.contains { $0.reason == .archiveWindowDropped })
-    s.close()
-}
-
-// A sustained disk stall drops many windows in a row -- these must dedupe
-// to the single already-open row, exactly like every other repeated-reason
-// gap open, not grow the table once per dropped window.
-@Test func testRepeatedDroppedArchiveWindowsDedupeToOneGapRow() async throws {
-    let p = tempPaths()
-    let c = try RecordingCoordinator(paths: p, sampleRate: 44100)
-    await c.start(deviceUID: "D")
-    for _ in 0..<50 {
-        await c.noteArchiveWindowDropped(at: Date())
-    }
-    await c.stop()
-    await c.shutdown()
-
-    let s = try EventStore(url: p.databaseURL)
-    let gaps = try s.allGaps().filter { $0.reason == .archiveWindowDropped }
-    #expect(gaps.count == 1)
-    s.close()
-}
-
 // C2 defense-in-depth: writeEventClip's "not recording" branch is reachable
 // even after MonitoringSession's stop()/shutdown() fix if some OTHER Task
 // raced this actor's own `stop()` in between assembling a clip and this
-// call landing. The interval is fully known here (unlike the archive-stub
-// case), so it must be logged as a real gap, not just a lastError string.
+// call landing. The interval is fully known here, so it must be logged as a
+// real gap, not just a lastError string.
 @Test func testEventClipWrittenWhileNotRecordingLogsAWriteFailureGap() async throws {
     let p = tempPaths()
     let c = try RecordingCoordinator(paths: p, sampleRate: 44100)
@@ -455,20 +386,6 @@ private func block(_ n: Int, _ v: Float = 0.1) -> [Float] { [Float](repeating: v
     #expect(s.isRecording == true)
     await c.stop()
     await c.shutdown()
-}
-
-// Archive segments discarded as sub-minimum stubs are surfaced through
-// status() rather than vanishing silently.
-@Test func testDiscardedArchiveStubsAreSurfacedInStatus() async throws {
-    let p = tempPaths()
-    let c = try RecordingCoordinator(paths: p, sampleRate: 44100, segmentDuration: 3600)
-    await c.start(deviceUID: "D")
-    await c.appendArchive(block(SegmentWriter.minimumReadableFrames - 1), wallClock: Date())
-    await c.stop()   // closes the current (sub-minimum) segment, discarding it
-
-    let s = await c.status()
-    #expect(s.discardedStubCount == 1)
-    #expect(s.discardedFrames == SegmentWriter.minimumReadableFrames - 1)
 }
 
 // MARK: - Monitoring span lifecycle (Task 3)

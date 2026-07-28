@@ -137,31 +137,6 @@ public final class MonitoringSession {
     /// production path.
     public var recordingRoot: URL?
 
-    /// Whether to write the continuous band-filtered archive.
-    ///
-    /// DEFAULT false — see the "CLIPS ONLY" decision in the design spec. The
-    /// archive costs ~52.4 MB/hour measured on real audio (~37 GB/month) versus
-    /// ~13 MB/night for event clips, and the use case does not need it. The code
-    /// is retained, not deleted, so the capability can be switched back on without
-    /// rebuilding it.
-    ///
-    /// Event clips, the event log, and gap logging are UNAFFECTED by this flag.
-    public var isContinuousArchiveEnabled: Bool = false
-
-    /// Windows of filtered archive audio dropped because the bounded archive
-    /// stream's buffer was full when they were produced (a stalled disk).
-    /// Every dropped window is lost audio and must be visible, not silent —
-    /// mirrors how `RecordingStatus.discardedStubCount`/`discardedFrames`
-    /// already surface `SegmentWriter`'s own discards rather than dropping
-    /// them unreported.
-    ///
-    /// Stays at 0 for the whole session when `isContinuousArchiveEnabled` is
-    /// false: no archive stream is ever created, so nothing can be dropped
-    /// from it — this must never carry over a stale nonzero value from a
-    /// previous, archive-enabled session either, which is why `start()` and
-    /// `startRecordingForTesting` both reset it unconditionally.
-    public private(set) var droppedArchiveWindowCount = 0
-
     /// Test-only visibility into the filtered audio that would be recorded.
     /// `@ObservationIgnored`: this is reassigned an ~8192-element array on
     /// every analysis window (~21.5 Hz) purely for test inspection, and an
@@ -174,21 +149,20 @@ public final class MonitoringSession {
     public var filteredBufferCapacityForTesting: Int { filteredBuffer.capacity }
 
     /// Test-only running total of samples actually handed to the filter +
-    /// `filteredBuffer` + archive-stream recording path this session (i.e.
-    /// AFTER the overlap-dedup fix below, never the full overlapping
-    /// analysis window). Pins the recording path to consuming each sample
-    /// of arrived audio exactly once: before the fix this would have
-    /// accumulated at up to 4x the real arrival rate (`fftSize`/`hopSize`
-    /// == 4), since every 75%-overlapping window was filtered and written
-    /// in full. `@ObservationIgnored` for the same reason as the property
-    /// above -- nothing here is ever read by SwiftUI.
+    /// `filteredBuffer` this session (i.e. AFTER the overlap-dedup fix below,
+    /// never the full overlapping analysis window). Pins the recording path
+    /// to consuming each sample of arrived audio exactly once: before the
+    /// fix this would have accumulated at up to 4x the real arrival rate
+    /// (`fftSize`/`hopSize` == 4), since every 75%-overlapping window was
+    /// filtered and written in full. `@ObservationIgnored` for the same
+    /// reason as the property above -- nothing here is ever read by SwiftUI.
     @ObservationIgnored public private(set) var recordedSampleCountForTesting: Int = 0
 
     /// Test-only peek into `filteredBuffer`'s accumulated content -- lets a
     /// test confirm the buffer holds a real, contiguous span of audio (not
     /// a duplicated/compressed one) by requesting the same
     /// `preRoll + duration + release` span an event clip would.
-    public func filteredArchiveLatestForTesting(_ count: Int) -> [Float] {
+    public func filteredBufferLatestForTesting(_ count: Int) -> [Float] {
         filteredBuffer.latest(count)
     }
 
@@ -340,13 +314,12 @@ public final class MonitoringSession {
     /// Recording status (write failures, free space, open gaps) changes
     /// slowly; coupling it to the ~21.5 Hz analysis rate would re-introduce
     /// exactly the per-frame SwiftUI cost the `displayInterval` throttle
-    /// above exists to avoid. Torn down (cancelled and re-nilled) alongside
-    /// `archiveContinuation`/`archiveConsumerTask` in both `stop()` and
-    /// `failCaptureStalled(at:)`, for the same reason those are: leaving it
-    /// running after its `coordinator` is gone would let a stale task from a
-    /// finished session keep overwriting `recordingStatus` with a defunct
-    /// coordinator's readings, potentially racing a NEW session's own
-    /// polling task after a stop() -> start() cycle.
+    /// above exists to avoid. Torn down (cancelled and re-nilled) in both
+    /// `stop()` and `failCaptureStalled(at:)`: leaving it running after its
+    /// `coordinator` is gone would let a stale task from a finished session
+    /// keep overwriting `recordingStatus` with a defunct coordinator's
+    /// readings, potentially racing a NEW session's own polling task after a
+    /// stop() -> start() cycle.
     @ObservationIgnored private var recordingStatusTask: Task<Void, Never>?
     /// How often `recordingStatusTask` polls. 1 Hz is ample: recording
     /// health is monotonic/slow-changing, unlike the spectrum/level display.
@@ -356,41 +329,6 @@ public final class MonitoringSession {
     /// in the under-reporting (never overstating) direction. See the spec.
     private static let heartbeatPollCount = 30
 
-    // MARK: Archive audio delivery (bounded, backpressured)
-    //
-    // `processWindow` must stay synchronous and never `await`, so it cannot
-    // hand filtered audio to the `coordinator` actor directly. Previously it
-    // spawned a `Task` per window; ordering was safe (main-actor tasks at
-    // equal priority run in enqueue order) but there was no backpressure —
-    // if the disk stalled, tasks would pile up unboundedly, each retaining an
-    // ~8192-element `[Float]`. An `AsyncStream` with a bounded, dropping
-    // buffering policy fixes this: `yield` is synchronous and non-blocking,
-    // and a stalled consumer drops the OLDEST buffered windows rather than
-    // growing without limit. Event clips are NOT sent through this stream —
-    // they stay on their own per-event `Task` (see `processWindow`) because
-    // they are rare and must never be dropped.
-    private struct ArchiveChunk: Sendable {
-        let samples: [Float]
-        let wallClock: Date
-    }
-    // ~64 windows at the ~46.4ms real hop interval is ~3s of buffered audio
-    // -- a few seconds' grace for a momentary disk stall before windows
-    // start being dropped, without letting an indefinitely stalled disk
-    // accumulate audio without bound.
-    //
-    // This whole subsystem — the stream, its continuation, and the consumer
-    // Task that drains it into `coordinator.appendArchive` — is only stood
-    // up in `start()`/`startRecordingForTesting` when
-    // `isContinuousArchiveEnabled` is true. With it false (the default, per
-    // the "CLIPS ONLY" decision), `archiveContinuation` stays nil for the
-    // whole session: `processWindow`'s `if ... let archiveContinuation`
-    // guard below then simply never fires, so no archive segment is ever
-    // created and `droppedArchiveWindowCount` never leaves 0. Event clips are
-    // unaffected either way — they read from `filteredBuffer`, which
-    // `processWindow` fills unconditionally regardless of this flag.
-    private static let archiveStreamBufferCount = 64
-    @ObservationIgnored private var archiveContinuation: AsyncStream<ArchiveChunk>.Continuation?
-    @ObservationIgnored private var archiveConsumerTask: Task<Void, Never>?
     private var analysisTask: Task<Void, Never>?
     // Detection timing runs on this rather than wall-clock time: an NTP
     // correction must not be able to stall an event's release (backwards
@@ -917,10 +855,6 @@ public final class MonitoringSession {
         // silently suppress the gap the NEXT run's disconnect should open.
         deviceDisconnectGapOpen = false
         captureConnection = .connected
-        // A fresh Start must not carry over a previous run's drop count --
-        // otherwise a clean run would inherit and forever display a stale
-        // number from before Stop. See the property's doc comment (I3).
-        droppedArchiveWindowCount = 0
         // A fresh Start must treat its very first window as entirely new --
         // without resetting this, a stop() -> start() cycle would compute
         // the first post-restart window's "new" sample count against a
@@ -990,8 +924,8 @@ public final class MonitoringSession {
         await bringUpCoordinatorForAwaitingStart()
     }
 
-    /// Brings up the `RecordingCoordinator` (and, if enabled, the archive
-    /// stream) and starts the status-polling/heartbeat task. Shared by both
+    /// Brings up the `RecordingCoordinator` and starts the
+    /// status-polling/heartbeat task. Shared by both
     /// `start(bySchedule:)` paths: the normal present-device path (called
     /// after `startCapture` succeeds, exactly as this was inlined there
     /// before) and the at-start chosen-but-absent path (called INSTEAD of
@@ -1027,61 +961,30 @@ public final class MonitoringSession {
         let uid = recordingDeviceUID()   // the device that actually captures
         Task { await c.start(deviceUID: uid) }
 
-        if isContinuousArchiveEnabled {
-            // Bounded, dropping consumer for archive audio -- see the
-            // `ArchiveChunk`/`archiveStreamBufferCount` doc comment above.
-            // `.bufferingNewest` drops the OLDEST buffered windows once
-            // full, which is what "a stalled disk loses the least-fresh
-            // audio, not the most-fresh" requires. Only stood up when
-            // the archive is actually enabled -- see that doc comment
-            // for what leaving this nil means for the rest of the file.
-            let (stream, continuation) = AsyncStream<ArchiveChunk>.makeStream(
-                bufferingPolicy: .bufferingNewest(Self.archiveStreamBufferCount))
-            archiveContinuation = continuation
-            archiveConsumerTask = Task {
-                for await chunk in stream {
-                    await c.appendArchive(chunk.samples, wallClock: chunk.wallClock)
-                }
-            }
-        }
-
         // Low-rate status polling, decoupled from analysis entirely
         // -- see the property doc comment. Fetches immediately (no
         // leading sleep) so the UI shows real status right away
         // rather than waiting out the first interval, then sleeps
-        // between subsequent polls. Captures `c` directly (like
-        // `archiveConsumerTask` above), not `self.coordinator`, so it
-        // always polls the coordinator THIS start() created even if
-        // a later start() replaces `self.coordinator` with a new one
-        // before this task is torn down.
+        // between subsequent polls. Captures `c` directly, not
+        // `self.coordinator`, so it always polls the coordinator THIS
+        // start() created even if a later start() replaces
+        // `self.coordinator` with a new one before this task is torn down.
         //
-        // Runs unconditionally -- NOT gated on `isContinuousArchiveEnabled`
-        // -- for two reasons: recording health/eventsWritten must stay
-        // visible with the archive off, and this is also what now
-        // enforces the disk floor (`enforceStorageFloor`, called
-        // first, every tick). That check used to live inside
-        // `appendArchive`, so it silently stopped running whenever the
-        // archive stream was never created; driving it from here
-        // instead means the floor is enforced whether or not the
-        // archive is running.
+        // This is also what enforces the disk floor (`enforceStorageFloor`,
+        // called first, every tick), since this coordinator has no
+        // periodic tick of its own to hang the check on.
         recordingStatusTask = Task { [weak self] in
             var pollsSinceHeartbeat = 0
             while !Task.isCancelled {
                 await c.enforceStorageFloor(at: Date())
                 let status = await c.status()
                 guard let self, !Task.isCancelled else { return }
-                // `droppedArchiveWindowCount` is tracked session-side
-                // (see its doc comment, I3) -- merge it in rather than
-                // publishing the coordinator's status verbatim, which
-                // knows nothing about drops that never reached it.
-                //
                 // Republish only on a real change: an @Observable
                 // assignment invalidates observers even when the value is
                 // identical, and this polls at 1 Hz -- without the guard,
                 // the menu-bar dropdown (which reads recordingStatus)
                 // rebuilt once a second while open, disturbing selection.
-                let merged = status.withDroppedArchiveWindowCount(self.droppedArchiveWindowCount)
-                if self.recordingStatus != merged { self.recordingStatus = merged }
+                if self.recordingStatus != status { self.recordingStatus = status }
 
                 // Ride this same poll to heartbeat the monitoring span every
                 // `heartbeatPollCount` polls (~30s at 1 Hz) -- see that
@@ -1156,12 +1059,11 @@ public final class MonitoringSession {
     /// (C2 -- appending it to `recentEvents` for the UI AND, if recording,
     /// assembling its clip synchronously via `prepareInProgressEventWrite`
     /// so nothing overwrites `filteredBuffer` before it's read), and tears
-    /// down the archive stream and status polling. Does NOT touch
-    /// `coordinator` itself -- each caller reads/nils it and finishes it in
-    /// its own way (`stop()`: fire-and-forget; `shutdown()`: fully awaited)
-    /// -- and does NOT set `lastError`, since `failCaptureStalled` has its
-    /// own distinct teardown shape (see that method) and is not built on
-    /// top of this helper.
+    /// down status polling. Does NOT touch `coordinator` itself -- each
+    /// caller reads/nils it and finishes it in its own way (`stop()`:
+    /// fire-and-forget; `shutdown()`: fully awaited) -- and does NOT set
+    /// `lastError`, since `failCaptureStalled` has its own distinct teardown
+    /// shape (see that method) and is not built on top of this helper.
     private func quiesceRunningSession(now: TimeInterval, wallNow: Date) -> PendingEventWrite? {
         analysisTask?.cancel()
         analysisTask = nil
@@ -1178,14 +1080,6 @@ public final class MonitoringSession {
             }
         }
         detectorState = detector.state
-
-        // Finish the archive stream before dropping the coordinator: once
-        // finished, the consumer's `for await` loop exits on its own after
-        // draining whatever is still buffered, so no windows already handed
-        // to the stream are lost by this stop.
-        archiveContinuation?.finish()
-        archiveContinuation = nil
-        archiveConsumerTask = nil
 
         // Stop polling before dropping `coordinator`: the task holds its own
         // strong reference to the coordinator it polls (see the task's doc
@@ -1240,9 +1134,9 @@ public final class MonitoringSession {
     /// caller is holding process termination open (`.terminateLater`)
     /// specifically so the process cannot exit mid-write. A FLAC file is
     /// unreadable until its writer is released (verified empirically), so
-    /// if this returned before the archive segment's writer actually
-    /// closed, quitting would still corrupt the in-progress segment exactly
-    /// as before this fix.
+    /// if this returned before an in-progress event clip's writer actually
+    /// closed, quitting would still corrupt that clip exactly as before this
+    /// fix.
     ///
     /// Opens (and, via the coordinator's own `stop()` inside `shutdown()`,
     /// immediately closes) a `.shutdown` gap: a deliberate, benign boundary
@@ -1413,13 +1307,13 @@ public final class MonitoringSession {
 
     /// Test-only: brings the session into the SAME "recording" state
     /// `start()` reaches once its `AudioCaptureEngine` starts successfully
-    /// (`isRunning == true`, a live `RecordingCoordinator`, the archive
-    /// stream wired up) WITHOUT requiring a real microphone or granted TCC
-    /// permission -- both of which `start()` itself needs before any of
-    /// that setup runs, making the disk-writing behavior exercised by C1/C2
-    /// (`stop()`/`shutdown()` writing an in-progress event, closing a real
-    /// segment) otherwise untestable in a sandboxed/CI environment with no
-    /// microphone access. Analysis is driven directly via
+    /// (`isRunning == true`, a live `RecordingCoordinator`) WITHOUT
+    /// requiring a real microphone or granted TCC permission -- both of
+    /// which `start()` itself needs before any of that setup runs, making
+    /// the disk-writing behavior exercised by C1/C2 (`stop()`/`shutdown()`
+    /// writing an in-progress event) otherwise untestable in a
+    /// sandboxed/CI environment with no microphone access. Analysis is
+    /// driven directly via
     /// `ingestForTesting`/`processLoopIteration`, exactly as real tests
     /// already do -- this seam only replaces the capture-engine bring-up
     /// portion of `start()`, nothing about how audio is analyzed or
@@ -1442,7 +1336,6 @@ public final class MonitoringSession {
         // Mirrors start()'s own reset -- see that call site's comment.
         deviceDisconnectGapOpen = false
         captureConnection = .connected
-        droppedArchiveWindowCount = 0
         lastConsumedTotal = nil
         recordedSampleCountForTesting = 0
 
@@ -1467,33 +1360,18 @@ public final class MonitoringSession {
         }
         await c.start(deviceUID: "test")
 
-        // Mirrors start()'s own gating -- see `isContinuousArchiveEnabled`'s
-        // doc comment. Callers that need archive coverage under this seam
-        // must set `isContinuousArchiveEnabled = true` before calling this.
-        if isContinuousArchiveEnabled {
-            let (stream, continuation) = AsyncStream<ArchiveChunk>.makeStream(
-                bufferingPolicy: .bufferingNewest(Self.archiveStreamBufferCount))
-            archiveContinuation = continuation
-            archiveConsumerTask = Task {
-                for await chunk in stream {
-                    await c.appendArchive(chunk.samples, wallClock: chunk.wallClock)
-                }
-            }
-        }
-
         // Mirrors start()'s own polling task -- without this,
         // `recordingStatus` stays nil forever under this seam, which is
-        // itself exactly the kind of gap I3 is about (a status nothing
-        // reads). Also mirrors start()'s unconditional disk-floor
-        // enforcement -- see that task's doc comment.
+        // itself exactly the kind of gap a status nothing reads would be.
+        // Also mirrors start()'s unconditional disk-floor enforcement -- see
+        // that task's doc comment.
         recordingStatusTask = Task { [weak self] in
             var pollsSinceHeartbeat = 0
             while !Task.isCancelled {
                 await c.enforceStorageFloor(at: Date())
                 let status = await c.status()
                 guard let self, !Task.isCancelled else { return }
-                let merged = status.withDroppedArchiveWindowCount(self.droppedArchiveWindowCount)
-                if self.recordingStatus != merged { self.recordingStatus = merged }
+                if self.recordingStatus != status { self.recordingStatus = status }
 
                 // Mirrors start()'s own heartbeat wiring -- see that task's comment.
                 pollsSinceHeartbeat += 1
@@ -1528,9 +1406,10 @@ public final class MonitoringSession {
                 noSignalGapOpen = false
                 let wall = Date()
                 // Close ONLY the .noSignal gap, not every open gap:
-                // `.writeFailure` opens on any failed archive append (which
-                // happen ~21.5/sec), so a `.writeFailure` gap being open at
-                // the same moment `.noSignal` clears is unremarkable, not
+                // `.writeFailure` can open independently (a failed event
+                // clip write, or arrived audio the analysis window could not
+                // represent), so a `.writeFailure` gap being open at the
+                // same moment `.noSignal` clears is unremarkable, not
                 // exotic. `closeOpenGaps` would falsely record a genuinely
                 // still-open `.writeFailure` gap as having ended here, in the
                 // exact table whose purpose is proving coverage.
@@ -1627,47 +1506,14 @@ public final class MonitoringSession {
             if let base = buf.baseAddress { filteredBuffer.write(base, count: filtered.count) }
         }
         if lostSampleCount > 0, isRecordingEnabled, let coordinator {
-            // Mirrors the dropped-archive-window handling just below: a
-            // coverage gap must never be silent (I3). `.writeFailure` is
-            // the closest existing reason -- audio that genuinely arrived
-            // but could never be recovered for recording, distinct from a
-            // disk write that was attempted and failed, but there is no
+            // A coverage gap must never be silent. `.writeFailure` is the
+            // closest existing reason -- audio that genuinely arrived but
+            // could never be recovered for recording, distinct from a disk
+            // write that was attempted and failed, but there is no
             // dedicated reason for "arrived audio the analysis window could
             // not represent."
             let wall = Date()
             Task { await coordinator.openGap(reason: .writeFailure, at: wall) }
-        }
-        if isRecordingEnabled, let archiveContinuation, !filtered.isEmpty {
-            let wall = Date()
-            // Synchronous, non-blocking: `processWindow` must never `await`.
-            // `.bufferingNewest` means a stalled disk drops the OLDEST
-            // buffered windows once the bounded buffer fills, rather than
-            // accumulating `Task`s (and their retained `[Float]`s) without
-            // limit -- but a drop is still lost audio, so it must not be
-            // silent.
-            switch archiveContinuation.yield(ArchiveChunk(samples: filtered, wallClock: wall)) {
-            case .dropped:
-                droppedArchiveWindowCount += 1
-                if let coordinator {
-                    // Fire-and-forget, like the other edge-condition gap
-                    // opens in this file (noSignalGapOpen/captureStalledGapOpen)
-                    // -- but unlike those, this is not itself edge-triggered:
-                    // it fires on every drop. That is safe because
-                    // `noteArchiveWindowDropped` funnels into `openGap`,
-                    // which dedupes repeat opens for the same reason to the
-                    // one already-open row (see its doc comment) -- so a
-                    // sustained stall spawns many small Tasks (no retained
-                    // audio, unlike the per-window archive Task this
-                    // replaced pre-M3) but only the FIRST one actually
-                    // reaches SQLite. The discontinuity this creates in the
-                    // archive file must not be silent (I3).
-                    Task { await coordinator.noteArchiveWindowDropped(at: wall) }
-                }
-            case .enqueued, .terminated:
-                break
-            @unknown default:
-                break
-            }
         }
 
         // Working copies are updated unconditionally, every single frame, at
@@ -1749,9 +1595,8 @@ public final class MonitoringSession {
 
                 let band = self.band
                 let threshold = detectorConfig.triggerDBFS
-                // Event clips stay on their own Task, separate from the
-                // bounded archive stream: they are rare and must never be
-                // dropped, unlike the continuous archive audio above.
+                // Event clips are rare and must never be dropped, so each
+                // gets its own Task.
                 Task {
                     await coordinator.writeEventClip(samples: clip, event: event,
                                                      eventStartWallClock: eventStart,

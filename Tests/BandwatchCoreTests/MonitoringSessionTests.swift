@@ -40,11 +40,6 @@ private func hasGap(reason: GapReason, atRoot root: URL) -> Bool {
     return ((try? store.allGaps()) ?? []).contains { $0.reason == reason }
 }
 
-private func archiveHasAnyFile(atRoot root: URL) -> Bool {
-    let dir = RecordingPaths(root: root).archiveDirectory
-    return (try? FileManager.default.subpathsOfDirectory(atPath: dir.path))?.isEmpty == false
-}
-
 @MainActor
 @Test func testSessionStartsIdle() {
     let s = MonitoringSession()
@@ -800,7 +795,7 @@ private func archiveHasAnyFile(atRoot root: URL) -> Bool {
     // exactly what an event's pre-roll fetch (`filteredBuffer.latest(...)`)
     // relies on.
     let requestedFrames = Int(sampleRate * worstCase)
-    let clip = s.filteredArchiveLatestForTesting(requestedFrames)
+    let clip = s.filteredBufferLatestForTesting(requestedFrames)
     #expect(clip.count == requestedFrames)
 }
 
@@ -961,10 +956,10 @@ private func archiveHasAnyFile(atRoot root: URL) -> Bool {
 }
 
 @MainActor
-@Test func testShutdownAwaitsWriteAndClosesSegmentAndRecordsShutdownGapBoundary() async throws {
+@Test func testShutdownAwaitsWriteAndRecordsShutdownGapBoundary() async throws {
     // C1: the crux of the fix. shutdown() must not return until the
-    // coordinator has actually closed the in-progress archive segment's
-    // writer -- a FLAC file is unreadable until its writer is released
+    // coordinator has actually finished writing any in-progress event's
+    // clip -- a FLAC file is unreadable until its writer is released
     // (verified empirically). This is checked with NO extra sleep/retry
     // after `await s.shutdown()`: if shutdown() only fired a detached Task
     // (the bug being fixed), reading the file back immediately would be a
@@ -972,39 +967,35 @@ private func archiveHasAnyFile(atRoot root: URL) -> Bool {
     // because shutdown() genuinely awaits the coordinator all the way
     // through, this is deterministic.
     let s = MonitoringSession()
-    // The archive is flag-disabled by default (CLIPS ONLY decision) -- this
-    // test is specifically about the archive segment's writer being closed
-    // before shutdown() returns, so it must opt back in.
-    s.isContinuousArchiveEnabled = true
+    // A long release time keeps the detector in `.recording` for the whole
+    // ingest loop below -- the event must still be genuinely in progress
+    // (not yet emitted through the normal processWindow path) when
+    // shutdown() is called.
+    s.detectorConfig = DetectorConfig(triggerDBFS: -40, minimumDuration: 0.5, releaseTime: 5.0)
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("bwsession-\(UUID().uuidString)")
     await s.startRecordingForTesting(root: root)
 
-    let quiet = [Float](repeating: 0, count: 8192)
+    let loud = sine(freq: 50, amplitude: 0.8, count: 8192, sampleRate: 44100)
     var t = 0.0
-    for _ in 0..<20 { s.ingestForTesting(samples: quiet, at: t); t += 0.05 }
-    // Let the archive consumer Task actually drain at least one chunk into
-    // the coordinator (creating the segment) before shutting down --
-    // otherwise there is nothing but silence-in-flight for shutdown() to
-    // have closed, and this assertion would be checking the wrong thing
-    // regardless of how the fix behaves.
-    await waitUntilTrue { archiveHasAnyFile(atRoot: root) }
+    for _ in 0..<40 { s.ingestForTesting(samples: loud, at: t); t += 0.05 }
+    #expect(s.detectorState == .recording)
 
     await s.shutdown()
 
     #expect(s.isRunning == false)
 
     let paths = RecordingPaths(root: root)
-    let files = try FileManager.default.subpathsOfDirectory(atPath: paths.archiveDirectory.path)
-        .filter { $0.hasSuffix(".flac") }
-    #expect(files.count == 1)
-    // Throws if the file is not a valid, finalized FLAC stream -- i.e. if
-    // its writer had not actually been released yet.
-    _ = try AVAudioFile(forReading: paths.archiveDirectory.appendingPathComponent(files[0]))
-
     let store = try EventStore(url: paths.databaseURL)
+    let rows = try store.allEvents()
     let gaps = try store.allGaps()
     store.close()
+
+    #expect(rows.count == 1)
+    // Throws if the file is not a valid, finalized FLAC stream -- i.e. if
+    // its writer had not actually been released yet.
+    _ = try AVAudioFile(forReading: URL(fileURLWithPath: rows[0].clipPath))
+
     // A deliberate, benign boundary marker distinguishing "the app was
     // quit here" from every other (failure) gap reason -- and, per
     // `GapReason.shutdown`'s doc comment, previously had ZERO producers
@@ -1019,76 +1010,11 @@ private func archiveHasAnyFile(atRoot root: URL) -> Bool {
     #expect(s.isRunning == false)
 }
 
+// A normal, detector-emitted event (via the live processWindow path, not a
+// forced stop()) still reaches the event store and its clip lands on disk.
 @MainActor
-@Test func testDroppedArchiveWindowsAreCountedSurfacedAndOpenAGap() async throws {
-    // I3: droppedArchiveWindowCount was incremented but never read anywhere
-    // (not RecordingStatus, not the UI, not a test), and a drop never
-    // opened a gap either -- a disk stall silently shortened the archive
-    // with a splice no reader could detect from the file alone.
+@Test func testDetectedEventWritesEventClipToStore() async throws {
     let s = MonitoringSession()
-    // This test is specifically about the archive stream's drop accounting,
-    // which only exists when the archive is enabled -- flag-disabled by
-    // default per the CLIPS ONLY decision.
-    s.isContinuousArchiveEnabled = true
-    let root = FileManager.default.temporaryDirectory
-        .appendingPathComponent("bwsession-\(UUID().uuidString)")
-    await s.startRecordingForTesting(root: root)
-
-    // Flood far more windows than the bounded archive stream can hold
-    // (archiveStreamBufferCount = 64) in a tight loop with NO `await`
-    // inside it -- the archive consumer Task cannot run even once until
-    // this loop yields control back, so windows beyond the buffer are
-    // genuinely, deterministically dropped, not merely "maybe" dropped
-    // under real disk-stall timing.
-    let quiet = [Float](repeating: 0, count: 8192)
-    var t = 0.0
-    for _ in 0..<200 { s.ingestForTesting(samples: quiet, at: t); t += 0.001 }
-
-    #expect(s.droppedArchiveWindowCount > 0)
-    let droppedCount = s.droppedArchiveWindowCount
-
-    // The status-polling task merges the session-side count into what it
-    // publishes (see its doc comment) -- give it a chance to poll at least
-    // once.
-    await waitUntilTrue { s.recordingStatus?.droppedArchiveWindowCount == droppedCount }
-    #expect(s.recordingStatus?.droppedArchiveWindowCount == droppedCount)
-
-    await waitUntilTrue { hasGap(reason: .archiveWindowDropped, atRoot: root) }
-    let store = try EventStore(url: RecordingPaths(root: root).databaseURL)
-    let gaps = try store.allGaps()
-    store.close()
-    #expect(gaps.contains { $0.reason == .archiveWindowDropped })
-
-    s.stop()
-
-    // A fresh start must not carry over the previous run's count.
-    let root2 = FileManager.default.temporaryDirectory
-        .appendingPathComponent("bwsession-\(UUID().uuidString)")
-    await s.startRecordingForTesting(root: root2)
-    #expect(s.droppedArchiveWindowCount == 0)
-    s.stop()
-}
-
-// MARK: - CLIPS ONLY (2026-07-21): isContinuousArchiveEnabled
-//
-// The continuous archive costs ~52.4 MB/hour (~37 GB/month) versus ~13
-// MB/night for event clips and is now flag-disabled by default. These tests
-// pin the two halves of that decision: with the flag off, no archive is
-// written but event clips still work identically; with it on, behaviour is
-// unchanged from before the flag existed.
-
-@MainActor
-@Test func testArchiveDisabledByDefault() {
-    let s = MonitoringSession()
-    #expect(s.isContinuousArchiveEnabled == false)
-}
-
-@MainActor
-@Test func testContinuousArchiveDisabledWritesNoArchiveButStillWritesEventClip() async throws {
-    let s = MonitoringSession()
-    // Default is false -- deliberately not set here, so this test also pins
-    // the default itself alongside the behavior.
-    #expect(s.isContinuousArchiveEnabled == false)
     s.detectorConfig = DetectorConfig(triggerDBFS: -40, minimumDuration: 0.05, releaseTime: 0.2)
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("bwsession-\(UUID().uuidString)")
@@ -1113,46 +1039,17 @@ private func archiveHasAnyFile(atRoot root: URL) -> Bool {
     #expect(rows.count == 1)
     #expect(FileManager.default.fileExists(atPath: rows.first?.clipPath ?? ""))
 
-    // The archive must be entirely absent: no directory, or an empty one --
-    // never a partially-written segment.
-    #expect(archiveHasAnyFile(atRoot: root) == false)
-
     s.stop()
 }
 
+// `recordingStatus` becomes populated via the 1 Hz status-poll task under
+// the no-mic `startRecordingForTesting` seam -- unlike
+// `testRecordingStatusIsPopulatedByPollingAndClearedByStop` above, which
+// requires real microphone permission and no-ops in CI, this runs
+// unconditionally. De-flaked with `waitUntilTrue`: under full-suite CPU
+// load the poll can take longer than any hard-coded delay.
 @MainActor
-@Test func testContinuousArchiveEnabledWritesArchiveFilesAsBefore() async throws {
-    let s = MonitoringSession()
-    s.isContinuousArchiveEnabled = true
-    let root = FileManager.default.temporaryDirectory
-        .appendingPathComponent("bwsession-\(UUID().uuidString)")
-    await s.startRecordingForTesting(root: root)
-
-    let quiet = [Float](repeating: 0, count: 8192)
-    var t = 0.0
-    for _ in 0..<20 { s.ingestForTesting(samples: quiet, at: t); t += 0.05 }
-    await waitUntilTrue { archiveHasAnyFile(atRoot: root) }
-
-    await s.shutdown()
-
-    let paths = RecordingPaths(root: root)
-    let files = try FileManager.default.subpathsOfDirectory(atPath: paths.archiveDirectory.path)
-        .filter { $0.hasSuffix(".flac") }
-    #expect(files.count == 1)
-    _ = try AVAudioFile(forReading: paths.archiveDirectory.appendingPathComponent(files[0]))
-}
-
-// RecordingCoordinator's segment (and therefore `status().currentSegment`)
-// is created lazily, only inside `SegmentWriter.append`, which is only ever
-// reached via `appendArchive`. With the archive disabled, MonitoringSession
-// never calls `appendArchive` at all (no stream, no consumer Task), so no
-// segment is ever created and `currentSegment` stays nil for the whole
-// session -- never a stale name left over from a moment before the flag was
-// read. No additional guard inside RecordingCoordinator was needed for this;
-// it falls out of SegmentWriter's existing laziness once the caller simply
-// never calls appendArchive.
-@MainActor
-@Test func testCurrentSegmentStaysNilWhenArchiveDisabled() async throws {
+@Test func testRecordingStatusIsPopulatedUnderTheNoMicTestSeam() async throws {
     let s = MonitoringSession()
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("bwsession-\(UUID().uuidString)")
@@ -1162,28 +1059,11 @@ private func archiveHasAnyFile(atRoot root: URL) -> Bool {
     var t = 0.0
     for _ in 0..<20 { s.ingestForTesting(samples: loud, at: t); t += 0.05 }
 
-    // Wait for the 1 Hz status-poll task to publish a status, rather than
-    // sleeping a fixed interval: under full-suite CPU load the poll can take
-    // longer than any hard-coded delay, which is what made this test flaky.
     await waitUntilTrue { s.recordingStatus != nil }
-    #expect(s.recordingStatus != nil)
-    #expect(s.recordingStatus?.currentSegment == nil)
+    #expect(s.recordingStatus?.isRecording == true)
 
     s.stop()
 }
-
-// Disk-floor enforcement itself (moved out of appendArchive so it keeps
-// running when the archive never does, driven instead from
-// MonitoringSession's 1 Hz status-polling task) is exercised end-to-end at
-// the RecordingCoordinator level in
-// RecordingCoordinatorTests.testEnforceStorageFloorStopsRecordingWithoutAnyArchiveAppend --
-// that test proves the mechanism no longer depends on any appendArchive call
-// ever happening, which is exactly the archive-disabled scenario.
-// MonitoringSession has no seam to inject a custom RetentionPolicy into the
-// coordinator it builds internally, so this is not duplicated here against a
-// second, independently-constructed coordinator sharing the same database
-// file, which would race the session's own coordinator for no added
-// coverage.
 
 // MARK: - Click-fix regression: recording must not splice at window
 // boundaries when the analysis loop's timing jitters.
@@ -1245,7 +1125,7 @@ private func archiveHasAnyFile(atRoot root: URL) -> Bool {
     // No duplication, no loss: exactly the real audio fed in must be recorded.
     #expect(s.recordedSampleCountForTesting == totalSamples)
 
-    let recorded = s.filteredArchiveLatestForTesting(totalSamples)
+    let recorded = s.filteredBufferLatestForTesting(totalSamples)
     #expect(recorded.count == totalSamples)
 
     // 3-point linear-prediction residual: a clean (filtered) sine predicts
