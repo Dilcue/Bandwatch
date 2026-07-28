@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import BandwatchCore
 
@@ -31,7 +32,17 @@ struct ReviewView: View {
         .padding(16)
         .frame(minWidth: 720, minHeight: 520)
         .background(Palette.surface(scheme))
-        .onAppear { model.load() }
+        .onAppear { model.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { note in
+            // When the Review window comes back to the front, reload data within
+            // the CURRENT range so events recorded since it was last viewed show
+            // up — without disturbing a range the user has narrowed (that's why
+            // this is load(), not refresh()). onAppear handles the initial
+            // full-span derive when the window first opens.
+            if (note.object as? NSWindow)?.title == "Bandwatch Review" {
+                model.load()
+            }
+        }
         .onChange(of: model.selectedEventID) { _, newID in
             guard let id = newID, let event = model.events.first(where: { $0.id == id }) else { return }
             player.play(url: URL(fileURLWithPath: event.clipPath))
@@ -93,6 +104,7 @@ struct ReviewView: View {
             DatePicker("To", selection: $model.rangeEnd, displayedComponents: .date)
             Text("\(model.events.count) events")
                 .font(.callout).foregroundStyle(Palette.mutedInk(scheme))
+            Button("Refresh") { model.load() }   // reload data, keep the chosen range
             Button("Export Evidence Bundle…") { exportEvidenceBundle() }
         }
     }

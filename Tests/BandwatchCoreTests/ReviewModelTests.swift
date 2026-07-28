@@ -31,6 +31,28 @@ private func seed(_ url: URL) throws {
     #expect(m.dailyCounts.first(where: { $0.day == "2026-07-21" })?.count == 3)
 }
 
+@MainActor @Test func testRefreshReDerivesRangeToIncludeNewerEvents() throws {
+    let url = tempDBURL(); try seed(url)   // 3 events on 2026-07-21
+    let m = ReviewModel(databaseURL: url)
+    m.refresh()
+    #expect(m.events.count == 3)
+
+    // Events written to the store AFTER the model was constructed, on a later day
+    // (mirrors monitoring continuing while the Review window is open/reopened).
+    let s = try EventStore(url: url, timeZone: TimeZone(identifier: "America/Chicago")!)
+    _ = try s.insertEvent(startedAt: iso("2026-07-25T10:00:00-05:00"), durationSec: 5, peakDBFS: -20,
+                          meanDBFS: -28, band: .bassSubwoofer, thresholdDBFS: -40, deviceUID: "D", clipPath: "/new.flac")
+    s.close()
+
+    // A plain reload keeps the construction-time range and misses the new day.
+    m.load()
+    #expect(m.events.count == 3)   // stale — new event is outside the old range
+
+    // refresh() re-derives the range from the data's current span and reloads.
+    m.refresh()
+    #expect(m.events.count == 4)   // now includes the newer event
+}
+
 @MainActor @Test func testMissingDatabaseIsAnEmptyStateNotACrash() {
     let m = ReviewModel(databaseURL: tempDBURL())   // never seeded
     m.load()

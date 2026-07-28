@@ -30,27 +30,44 @@ public final class ReviewModel {
 
     public init(databaseURL: URL) {
         self.databaseURL = databaseURL
-        // Default range: the whole days the recorded data actually spans, so an
-        // evidence report describes the period it covers rather than an arbitrary
-        // 30-day window ending at the generation instant. `rangeEnd` is the start
-        // of the day AFTER the last activity (exclusive end of that day), matching
-        // the date-only From/To pickers. Falls back to today when the database is
-        // empty or absent (e.g. a fresh install before any recording).
+        // Placeholder range; `deriveRangeFromData()` below overwrites it with the
+        // whole span the recorded data actually covers. `isReady` is still false
+        // here, so these assignments (and the ones inside `deriveRangeFromData`)
+        // do not fire the `load()` didSet — see `isReady`'s doc comment.
         let cal = Calendar.current
-        var extent: (earliest: Date, latest: Date)?
-        if let store = try? EventStore(readOnlyURL: databaseURL) {
-            extent = try? store.dataExtent()
-            store.close()
-        }
-        if let extent {
-            self.rangeStart = cal.startOfDay(for: extent.earliest)
-            self.rangeEnd = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: extent.latest))!
-        } else {
-            let today = cal.startOfDay(for: Date())
-            self.rangeStart = today
-            self.rangeEnd = cal.date(byAdding: .day, value: 1, to: today)!
-        }
+        let today = cal.startOfDay(for: Date())
+        self.rangeStart = today
+        self.rangeEnd = cal.date(byAdding: .day, value: 1, to: today)!
+        deriveRangeFromData()
         self.isReady = true
+    }
+
+    /// Sets the visible range to the whole span the recorded data covers: whole
+    /// calendar days from the earliest event to the day AFTER the latest (an
+    /// exclusive end matching the date-only From/To pickers), so an evidence
+    /// report describes the period it covers rather than an arbitrary window.
+    /// Leaves the placeholder (today) range untouched when the database is empty
+    /// or absent. The caller manages `isReady`/`load()` (both `init` and
+    /// `refresh()` do), so this only assigns the range.
+    private func deriveRangeFromData() {
+        guard let store = try? EventStore(readOnlyURL: databaseURL) else { return }
+        defer { store.close() }
+        guard let extent = try? store.dataExtent() else { return }
+        let cal = Calendar.current
+        rangeStart = cal.startOfDay(for: extent.earliest)
+        rangeEnd = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: extent.latest))!
+    }
+
+    /// Re-derives the range from the data's current span and reloads, so opening
+    /// or re-focusing the Review window always reflects everything recorded up to
+    /// now — including events written since it was last viewed (the range is
+    /// otherwise fixed at construction). Suppresses the per-property `load()`
+    /// didSets around the range assignment so the reload happens exactly once.
+    public func refresh() {
+        isReady = false
+        deriveRangeFromData()
+        isReady = true
+        load()
     }
 
     public var selectedEvent: EventRecord? {
