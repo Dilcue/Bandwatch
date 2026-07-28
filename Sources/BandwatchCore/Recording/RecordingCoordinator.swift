@@ -17,12 +17,6 @@ public struct RecordingStatus: Equatable, Sendable {
     /// unaccounted for.
     public let staleOpenGaps: Int
 
-    /// Cumulative count of event clips `runRetention` has actually deleted
-    /// over this coordinator's lifetime. Exists so a retention loop that is
-    /// silently failing (e.g. every delete throwing) is visible as "0 and
-    /// not climbing" rather than assumed to be working just because it ran.
-    public let eventClipsDeleted: Int
-
     /// Increments on every write failure (event clip write or event-row
     /// insert) and resets to zero on the next successful write.
     /// `isRecording == true` only means a session is active, not that writes
@@ -37,14 +31,12 @@ public struct RecordingStatus: Equatable, Sendable {
                 lastError: String?,
                 freeBytes: Int64?,
                 staleOpenGaps: Int = 0,
-                eventClipsDeleted: Int = 0,
                 consecutiveWriteFailures: Int = 0) {
         self.isRecording = isRecording
         self.eventsWritten = eventsWritten
         self.lastError = lastError
         self.freeBytes = freeBytes
         self.staleOpenGaps = staleOpenGaps
-        self.eventClipsDeleted = eventClipsDeleted
         self.consecutiveWriteFailures = consecutiveWriteFailures
     }
 }
@@ -92,7 +84,6 @@ public actor RecordingCoordinator {
     /// `heartbeatSpan` and finalized in `stop()`. Only one span is open per session.
     private var currentSpanID: Int64?
 
-    private var eventClipsDeleted = 0
     private var consecutiveWriteFailures = 0
 
     /// Gaps discovered still open at `init`, before this session opens or
@@ -335,31 +326,7 @@ public actor RecordingCoordinator {
                         lastError: lastError,
                         freeBytes: storage.freeBytes(),
                         staleOpenGaps: staleOpenGaps,
-                        eventClipsDeleted: eventClipsDeleted,
                         consecutiveWriteFailures: consecutiveWriteFailures)
-    }
-
-    /// Applies retention. Failures are recorded in `lastError` rather than
-    /// swallowed with `try?`, and what was actually deleted is accumulated
-    /// into `eventClipsDeleted` so a silently-failing retention loop (disk
-    /// filling while the count stays flat) is visible through `status()`
-    /// instead of assumed to be working.
-    public func runRetention(now: Date) {
-        let cutoffForEvents = storage.applyRetention(now: now)
-
-        do {
-            let deletedPaths = try store.deleteEvents(olderThan: cutoffForEvents)
-            eventClipsDeleted += deletedPaths.count
-            for p in deletedPaths {
-                do {
-                    try FileManager.default.removeItem(atPath: p)
-                } catch {
-                    lastError = "retention: could not remove orphaned clip \(p): \(error)"
-                }
-            }
-        } catch {
-            lastError = "retention: could not delete event rows: \(error)"
-        }
     }
 
     // MARK: Private
@@ -406,15 +373,13 @@ public actor RecordingCoordinator {
         consecutiveWriteFailures = 0
     }
 
-    /// Checks `storage.isBelowFloor()` and, if still breached after
-    /// retention, stops recording — the application must not pretend to
-    /// keep recording onto a full disk (see `StorageManager`'s documented
-    /// caller contract). Reclaiming space via retention is the preferred
-    /// outcome and must not itself stop recording; only a floor still
-    /// breached after retention does. The `.diskFull` gap is opened before
-    /// `stop()` so it is captured by `stop()`'s own close-open-gaps step,
-    /// honestly recording the interval from the floor breach to the moment
-    /// recording actually stopped.
+    /// Checks `storage.isBelowFloor()` and, if breached, stops recording
+    /// immediately — the application must not pretend to keep recording onto
+    /// a full disk (see `StorageManager`'s documented caller contract), and
+    /// it must never delete existing evidence to reclaim space. The
+    /// `.diskFull` gap is opened before `stop()` so it is captured by
+    /// `stop()`'s own close-open-gaps step, honestly recording the interval
+    /// from the floor breach to the moment recording actually stopped.
     ///
     /// `public` and driven externally: `MonitoringSession`'s 1 Hz
     /// recording-status poll calls it directly and unconditionally, since
@@ -424,10 +389,7 @@ public actor RecordingCoordinator {
         guard recording else { return }
         guard storage.isBelowFloor() else { return }
 
-        runRetention(now: date)
-        guard storage.isBelowFloor() else { return }
-
-        lastError = "disk space below retention floor even after retention; stopping recording"
+        lastError = "disk space below floor; stopping recording"
         openGap(reason: .diskFull, at: date)
         stop()
     }

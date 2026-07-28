@@ -1,26 +1,24 @@
 import Foundation
 
 public struct RetentionPolicy: Equatable, Sendable {
-    public var eventDays: Int
     public var diskFloorBytes: Int64
 
-    public init(eventDays: Int = 90,
-                diskFloorBytes: Int64 = 10 * 1024 * 1024 * 1024) {
-        self.eventDays = eventDays
+    public init(diskFloorBytes: Int64 = 10 * 1024 * 1024 * 1024) {
         self.diskFloorBytes = diskFloorBytes
     }
 }
 
-/// Disk-space policy and retention.
+/// Disk-space policy. There is no time-based event retention: an evidence
+/// tool must never silently delete evidence, so events are kept forever and
+/// the only guardrail is the disk-space floor below. When free space drops
+/// below `diskFloorBytes` the caller must stop recording and say so — the
+/// application never pretends to record, and it never deletes existing
+/// evidence to make room.
 ///
-/// If space still cannot be reclaimed the caller must stop recording and say
-/// so — the application never pretends to record.
-///
-/// Retention defaults (90 days events, 10 GB floor) are placeholders from the
-/// spec, not derived from a measured MB/hour figure. Real disk consumption
-/// under band-filtered audio is not yet known and will be measured during
-/// manual verification; do not tune these values against an unverified
-/// estimate.
+/// The 10 GB floor default is a placeholder from the spec, not derived from a
+/// measured MB/hour figure. Real disk consumption under band-filtered audio
+/// is not yet known and will be measured during manual verification; do not
+/// tune this value against an unverified estimate.
 public final class StorageManager {
     public let policy: RetentionPolicy
     private let paths: RecordingPaths
@@ -56,11 +54,5 @@ public final class StorageManager {
         // reconsidering the failure mode.
         guard let free = freeBytes() else { return true }
         return free < policy.diskFloorBytes
-    }
-
-    /// Applies time-based retention. Returns the cutoff the caller should
-    /// pass to `EventStore.deleteEvents`.
-    public func applyRetention(now: Date) -> Date {
-        now.addingTimeInterval(-Double(policy.eventDays) * 86400)
     }
 }

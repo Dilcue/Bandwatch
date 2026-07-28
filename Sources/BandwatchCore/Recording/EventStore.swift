@@ -249,34 +249,6 @@ public final class EventStore {
         }
     }
 
-    /// Deletes rows older than `date` and returns their clip paths so the files
-    /// can be removed too.
-    ///
-    /// Uses a single `DELETE ... RETURNING` statement rather than a `SELECT`
-    /// followed by a `DELETE`: with two statements, the `WHERE` predicate is
-    /// re-evaluated at DELETE time, so a row inserted between the SELECT and
-    /// the DELETE would be deleted without its path ever being returned to
-    /// the caller — permanently orphaning that row's clip file on disk.
-    /// `RETURNING` (SQLite 3.35+) deletes and reports the affected rows
-    /// atomically within one statement, so no row can vanish unreported.
-    public func deleteEvents(olderThan date: Date) throws -> [String] {
-        let st = try prepare("DELETE FROM events WHERE started_at < ? RETURNING clip_path;")
-        defer { sqlite3_finalize(st) }
-        sqlite3_bind_text(st, 1, iso.string(from: date), -1, Self.transient)
-        var paths: [String] = []
-        loop: while true {
-            switch sqlite3_step(st) {
-            case SQLITE_ROW:
-                paths.append(String(cString: sqlite3_column_text(st, 0)))
-            case SQLITE_DONE:
-                break loop
-            default:
-                throw sqlError()
-            }
-        }
-        return paths
-    }
-
     // MARK: Gaps
 
     public func openGap(startedAt: Date, reason: GapReason) throws -> Int64 {

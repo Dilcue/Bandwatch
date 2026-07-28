@@ -135,20 +135,6 @@ private func insertOne(_ s: EventStore, at date: Date, peak: Double = -18.5,
     s.close()
 }
 
-@Test func testDeleteOldEventsReturnsClipPaths() throws {
-    let s = try makeStore()
-    let base = Date(timeIntervalSince1970: 1_784_000_000)
-    _ = try insertOne(s, at: base, clip: "/old1.flac")
-    _ = try insertOne(s, at: base.addingTimeInterval(60), clip: "/old2.flac")
-    _ = try insertOne(s, at: base.addingTimeInterval(100_000), clip: "/new.flac")
-
-    let deleted = try s.deleteEvents(olderThan: base.addingTimeInterval(1000))
-    #expect(Set(deleted) == Set(["/old1.flac", "/old2.flac"]))
-    #expect(try s.allEvents().count == 1)
-    #expect(try s.allEvents()[0].clipPath == "/new.flac")
-    s.close()
-}
-
 @Test func testReopeningKeepsData() throws {
     let url = tempDB()
     let s1 = try EventStore(url: url)
@@ -187,30 +173,6 @@ private func insertOne(_ s: EventStore, at date: Date, peak: Double = -18.5,
     let stored = try rawColumnText(at: url, sql: "SELECT started_at FROM events LIMIT 1;")
     #expect(!stored.hasSuffix("Z"))
     #expect(stored.hasSuffix("-05:00"))
-}
-
-// MARK: Delete race (Finding 2)
-
-@Test func testDeleteEventsRETURNINGMatchesDisappearedRows() throws {
-    let s = try makeStore()
-    let base = Date(timeIntervalSince1970: 1_784_000_000)
-    let keptId = try insertOne(s, at: base.addingTimeInterval(100_000), clip: "/new.flac")
-    var doomedIds: Set<Int64> = []
-    doomedIds.insert(try insertOne(s, at: base, clip: "/old1.flac"))
-    doomedIds.insert(try insertOne(s, at: base.addingTimeInterval(60), clip: "/old2.flac"))
-
-    let before = Set(try s.allEvents().map(\.id))
-    #expect(before == doomedIds.union([keptId]))
-
-    let deleted = try s.deleteEvents(olderThan: base.addingTimeInterval(1000))
-    let after = Set(try s.allEvents().map(\.id))
-
-    // Exactly the rows that vanished from the table are the ones whose paths
-    // came back — nothing is deleted silently.
-    let disappearedIds = before.subtracting(after)
-    #expect(disappearedIds == doomedIds)
-    #expect(Set(deleted) == Set(["/old1.flac", "/old2.flac"]))
-    s.close()
 }
 
 // MARK: Unknown gap reason (Finding 3)

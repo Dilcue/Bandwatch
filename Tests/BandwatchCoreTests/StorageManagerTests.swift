@@ -11,7 +11,6 @@ private func tempRoot() -> URL {
 
 @Test func testDefaultPolicyMatchesSpec() {
     let p = RetentionPolicy()
-    #expect(p.eventDays == 90)
     #expect(p.diskFloorBytes == 10 * 1024 * 1024 * 1024)
 }
 
@@ -20,16 +19,6 @@ private func tempRoot() -> URL {
     let free = m.freeBytes()
     #expect(free != nil)
     #expect((free ?? 0) > 0)
-}
-
-@Test func testApplyRetentionReturnsEventCutoff() {
-    let root = tempRoot()
-    let paths = RecordingPaths(root: root)
-    let m = StorageManager(paths: paths, policy: RetentionPolicy(eventDays: 90, diskFloorBytes: 0))
-    let now = Date()
-    let cutoffForEvents = m.applyRetention(now: now)
-    // Event cutoff is 90 days back
-    #expect(abs(cutoffForEvents.timeIntervalSince(now.addingTimeInterval(-90 * 86400))) < 1)
 }
 
 @Test func testFreeSpaceReportedForNonExistentRoot() {
