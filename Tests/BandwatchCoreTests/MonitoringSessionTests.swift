@@ -113,6 +113,33 @@ private func archiveHasAnyFile(atRoot root: URL) -> Bool {
 }
 
 @MainActor
+@Test func testDetectedEventSetsLastEventAtToRecentWallClockTime() {
+    let s = MonitoringSession()
+    #expect(s.lastEventAt == nil)
+    s.detectorConfig = DetectorConfig(triggerDBFS: -40, minimumDuration: 0.5, releaseTime: 1.0)
+
+    let loud = sine(freq: 50, amplitude: 0.8, count: 8192, sampleRate: 44100)
+    let quiet = [Float](repeating: 0, count: 8192)
+
+    let before = Date()
+    var t = 0.0
+    for _ in 0..<40 { s.ingestForTesting(samples: loud, at: t); t += 0.05 }
+    for _ in 0..<60 { s.ingestForTesting(samples: quiet, at: t); t += 0.05 }
+
+    #expect(s.recentEvents.count >= 1)
+    guard let lastEventAt = s.lastEventAt else {
+        Issue.record("expected lastEventAt to be set once an event fired")
+        return
+    }
+    // Set to wall-clock "now" at the moment the event fired -- `event.startTime`
+    // itself is monotonic and can't be used for this, so this must be close to
+    // real time, not derived from the (arbitrary) `at:` monotonic timestamps
+    // fed to `ingestForTesting` above.
+    #expect(lastEventAt.timeIntervalSince(before) >= 0)
+    #expect(abs(lastEventAt.timeIntervalSinceNow) < 5.0)
+}
+
+@MainActor
 @Test func testOutOfBandAudioProducesNoEvent() {
     let s = MonitoringSession()
     s.band = .bassSubwoofer
@@ -902,6 +929,35 @@ private func archiveHasAnyFile(atRoot root: URL) -> Bool {
     let rows = try store.allEvents()
     store.close()
     #expect(rows.count == 1)
+}
+
+@MainActor
+@Test func testStartSeedsLastEventAtFromExistingStoreHistory() async throws {
+    // `recentEvents` is in-memory only and resets on restart, so `lastEventAt`
+    // must be seeded from the database at monitoring start -- otherwise the
+    // readout would wrongly show "none" right after a restart even though the
+    // store has real history.
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bwsession-\(UUID().uuidString)")
+    let seededDate = Date(timeIntervalSince1970: 1_784_000_000)
+    // Insert an event into the store BEFORE the session ever starts, exactly
+    // as a real prior run would have left behind.
+    let store = try EventStore(url: RecordingPaths(root: root).databaseURL)
+    _ = try store.insertEvent(startedAt: seededDate, durationSec: 1, peakDBFS: -10,
+                              meanDBFS: -20, band: .bassSubwoofer, thresholdDBFS: -40,
+                              deviceUID: "DEV-1", clipPath: "/tmp/seed.flac")
+    store.close()
+
+    let s = MonitoringSession()
+    #expect(s.lastEventAt == nil)
+    await s.startRecordingForTesting(root: root)
+
+    guard let lastEventAt = s.lastEventAt else {
+        Issue.record("expected lastEventAt to be seeded from existing store history")
+        return
+    }
+    #expect(abs(lastEventAt.timeIntervalSince(seededDate)) < 1.0)
+    s.stop()
 }
 
 @MainActor

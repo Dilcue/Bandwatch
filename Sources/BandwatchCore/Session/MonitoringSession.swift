@@ -80,6 +80,16 @@ public final class MonitoringSession {
     public private(set) var levelHistory: [Double] = []
     public private(set) var detectorState: DetectorState = .idle
     public private(set) var recentEvents: [DetectedEvent] = []
+    /// Wall-clock time of the most recently detected event, for the "Last
+    /// event" readout -- distinct from `DetectedEvent.startTime`, which is a
+    /// MONOTONIC clock value and can't be formatted as a calendar time. Set
+    /// in `appendEvent(_:)` when an event fires (wall-clock "now" IS the
+    /// event's real time at that moment), and seeded from the event store's
+    /// most recent event at monitoring start (see
+    /// `bringUpCoordinatorForAwaitingStart`/`startRecordingForTesting`) so it
+    /// reflects real history across restarts rather than resetting to nil --
+    /// unlike `recentEvents`, which is in-memory only.
+    public private(set) var lastEventAt: Date?
     public private(set) var suggestedThresholdDBFS: Double?
     public private(set) var isRunning = false
     /// True while a session the SCHEDULER started is running. The scheduler stops
@@ -1003,6 +1013,17 @@ public final class MonitoringSession {
         guard let c = try? RecordingCoordinator(paths: paths, sampleRate: sampleRate,
                                                 resolveGapsOpenedBefore: launchTime) else { return }
         coordinator = c
+        // Seed `lastEventAt` from real history the first time a coordinator
+        // becomes available this run -- but never clobber a value already
+        // set this run (e.g. an event that fired between this session's
+        // construction and this start(), under the in-memory-only test
+        // seams). `recentEvents` itself is in-memory only and does not
+        // survive a restart, so without this the readout would wrongly show
+        // "none" right after a restart despite real history in the store.
+        if lastEventAt == nil {
+            let seeded = await c.latestEventStartedAt()
+            if lastEventAt == nil { lastEventAt = seeded }
+        }
         let uid = recordingDeviceUID()   // the device that actually captures
         Task { await c.start(deviceUID: uid) }
 
@@ -1438,6 +1459,12 @@ public final class MonitoringSession {
             return
         }
         coordinator = c
+        // Mirrors `bringUpCoordinatorForAwaitingStart`'s own seeding -- see
+        // that call site's comment.
+        if lastEventAt == nil {
+            let seeded = await c.latestEventStartedAt()
+            if lastEventAt == nil { lastEventAt = seeded }
+        }
         await c.start(deviceUID: "test")
 
         // Mirrors start()'s own gating -- see `isContinuousArchiveEnabled`'s
@@ -1759,6 +1786,9 @@ public final class MonitoringSession {
         if recentEvents.count > Self.recentEventsCapacity {
             recentEvents.removeFirst(recentEvents.count - Self.recentEventsCapacity)
         }
+        // The event just fired in real time, so wall-clock now IS its time --
+        // `event.startTime` itself is monotonic and can't be used here.
+        lastEventAt = Date()
     }
 }
 

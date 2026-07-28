@@ -281,6 +281,25 @@ private func insertOne(_ s: EventStore, at date: Date, peak: Double = -18.5,
     #expect(abs(closed.endedAt!.timeIntervalSince(base.addingTimeInterval(50))) < 1)
 }
 
+// MARK: Last-event readout seeding
+
+@Test func testLatestEventStartedAtIsNilWhenEmpty() throws {
+    let s = try makeStore()
+    #expect(try s.latestEventStartedAt() == nil)
+    s.close()
+}
+
+@Test func testLatestEventStartedAtReturnsMaxStartedAt() throws {
+    let s = try makeStore()
+    let base = Date(timeIntervalSince1970: 1_784_000_000)
+    _ = try insertOne(s, at: base)
+    _ = try insertOne(s, at: base.addingTimeInterval(3600))   // latest
+    _ = try insertOne(s, at: base.addingTimeInterval(1800))
+    let latest = try #require(try s.latestEventStartedAt())
+    #expect(abs(latest.timeIntervalSince(base.addingTimeInterval(3600))) < 1)
+    s.close()
+}
+
 @Test func testDataExtentIsNilWhenEmptyAndSpansAllTablesOtherwise() throws {
     let s = try makeStore()
     #expect(try s.dataExtent() == nil)   // empty database

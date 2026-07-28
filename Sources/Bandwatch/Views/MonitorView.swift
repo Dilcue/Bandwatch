@@ -563,7 +563,11 @@ private struct ReadoutRow: View {
         HStack(spacing: 12) {
             Text("Band: \(Int(session.band.lowHz))–\(Int(session.band.highHz)) Hz")
             LiveLevelText(session: session)
-            Text("Events: \(session.recentEvents.count)")
+            if let lastEventAt = session.lastEventAt {
+                Text("Last event: \(lastEventAt.formatted(date: .abbreviated, time: .shortened))")
+            } else {
+                Text("Last event: none")
+            }
         }
         .font(.system(size: 11, design: .monospaced))
         .foregroundStyle(Palette.primaryInk(scheme))

@@ -451,6 +451,19 @@ public final class EventStore {
         return out
     }
 
+    /// The wall-clock start time of the most recently started event, or nil
+    /// when the events table is empty. Used to seed
+    /// `MonitoringSession.lastEventAt` at monitoring start, so the "Last
+    /// event" readout reflects real history across restarts rather than
+    /// resetting to "none" every launch.
+    public func latestEventStartedAt() throws -> Date? {
+        let st = try prepare("SELECT MAX(started_at) FROM events;")
+        defer { sqlite3_finalize(st) }
+        guard sqlite3_step(st) == SQLITE_ROW, sqlite3_column_type(st, 0) != SQLITE_NULL,
+              let text = sqlite3_column_text(st, 0) else { return nil }
+        return iso.date(from: String(cString: text))
+    }
+
     public func eventCount(from: Date, to: Date) throws -> Int {
         let st = try prepare("SELECT COUNT(*) FROM events WHERE started_at >= ? AND started_at <= ?;")
         defer { sqlite3_finalize(st) }

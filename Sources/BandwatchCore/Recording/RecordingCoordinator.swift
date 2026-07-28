@@ -413,6 +413,15 @@ public actor RecordingCoordinator {
         openGapIDsByReason = stillOpen
     }
 
+    /// The wall-clock start time of the most recently started event in this
+    /// coordinator's store, or nil when there is none. Wraps
+    /// `EventStore.latestEventStartedAt()` for callers outside this actor
+    /// (`MonitoringSession`, seeding `lastEventAt` at monitoring start) --
+    /// `EventStore` itself is not `Sendable` and never leaves this actor.
+    public func latestEventStartedAt() -> Date? {
+        (try? store.latestEventStartedAt()) ?? nil
+    }
+
     public func status() -> RecordingStatus {
         RecordingStatus(isRecording: recording,
                         currentSegment: segments.currentURL?.lastPathComponent,
