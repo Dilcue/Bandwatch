@@ -447,29 +447,20 @@ public final class EventStore {
         }
     }
 
-    /// Monitored seconds over `[from, to]` = time inside a monitoring span, minus
-    /// in-span gap time. Spans are the positive record of "the recorder was
-    /// running"; gaps are interruptions within a run. A range with no span reports
-    /// zero monitored seconds — the calendar/PDF no longer infer coverage from the
-    /// mere absence of gap rows. Each span/gap is clamped to the range; a span
-    /// contributes only its real [started_at, ended_at] seconds and is never
-    /// extended to `to`, so coverage never overstates.
-    public func coverageTotals(from: Date, to: Date) throws -> CoverageTotals {
-        var spanSeconds = 0.0
-        for s in try spans(from: from, to: to) {
-            let start = max(s.startedAt, from)
-            let end = min(s.endedAt, to)
-            spanSeconds += max(end.timeIntervalSince(start), 0)
-        }
+    /// Monitored seconds over `[from, to]` = union(span time) minus union(gap
+    /// time), via `CoverageMath` (see there for the exact contract). Spans are the
+    /// positive record of "the recorder was running"; gaps are interruptions
+    /// within a run. A range with no span reports zero monitored seconds — the
+    /// calendar/PDF no longer infer coverage from the mere absence of gap rows.
+    /// `now` caps the window so a report for a range whose end lies in the future
+    /// (e.g. today) counts only elapsed time, and an open gap is not projected
+    /// past the present; defaults to the wall clock, injectable for tests.
+    public func coverageTotals(from: Date, to: Date, now: Date = Date()) throws -> CoverageTotals {
         let overlappingGaps = try gaps(from: from, to: to)
-        var gapSeconds = 0.0
-        for g in overlappingGaps {
-            let start = max(g.startedAt, from)
-            let end = min(g.endedAt ?? to, to)
-            gapSeconds += max(end.timeIntervalSince(start), 0)
-        }
-        return CoverageTotals(monitoredSeconds: max(spanSeconds - gapSeconds, 0),
-                              gapSeconds: gapSeconds, gapCount: overlappingGaps.count)
+        let t = CoverageMath.totals(spans: try spans(from: from, to: to),
+                                    gaps: overlappingGaps, from: from, to: to, now: now)
+        return CoverageTotals(monitoredSeconds: t.monitoredSeconds,
+                              gapSeconds: t.gapSeconds, gapCount: overlappingGaps.count)
     }
 
     // MARK: Private

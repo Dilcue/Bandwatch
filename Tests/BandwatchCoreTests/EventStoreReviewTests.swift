@@ -137,6 +137,35 @@ private func seed(_ url: URL) throws {
     ro.close()
 }
 
+@Test func testLiveReportWithOpenOverlappingGapsIsNotZeroed() throws {
+    // The reported incident, end to end: a report generated for "today" while
+    // monitoring is live, with two overlapping gaps still OPEN. The old math
+    // projected each open gap to the range end (midnight, hours ahead) and
+    // summed them (~26.9h), zeroing a genuinely ~10h-monitored day. `now` (the
+    // report moment) must cap the window so open gaps count only through now and
+    // the union is taken.
+    let url = tempDBURL()
+    let w = try EventStore(url: url)
+    let from = iso("2026-07-29T00:00:00-05:00")
+    let to   = iso("2026-07-30T00:00:00-05:00")         // midnight tonight (future)
+    let now  = iso("2026-07-29T10:33:00-05:00")         // report time, 13.5h before `to`
+    // Monitoring ran 00:00 -> 10:00 (10h).
+    let sid = try w.openSpan(startedAt: from)
+    try w.updateSpanEnd(id: sid, endedAt: iso("2026-07-29T10:00:00-05:00"))
+    // Two overlapping gaps left OPEN (write-failure then device-loss), as in the
+    // incident — never closed because the app was still running at report time.
+    _ = try w.openGap(startedAt: iso("2026-07-29T10:31:15-05:00"), reason: .writeFailure)
+    _ = try w.openGap(startedAt: iso("2026-07-29T10:32:20-05:00"), reason: .deviceLost)
+    w.close()
+
+    let ro = try EventStore(readOnlyURL: url)
+    let cov = try ro.coverageTotals(from: from, to: to, now: now)
+    #expect(cov.monitoredSeconds > 9.5 * 3600)   // ~10h monitored — NOT zero
+    #expect(cov.gapSeconds < 5 * 60)             // a couple minutes, not 26.9h
+    #expect(cov.gapCount == 2)                   // still honestly reports two gap rows
+    ro.close()
+}
+
 @Test func testEventCountAndEventListConsistentAtBoundary() throws {
     let url = tempDBURL()
     let w = try EventStore(url: url, timeZone: TimeZone(identifier: "America/Chicago")!)

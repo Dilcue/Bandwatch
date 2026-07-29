@@ -125,17 +125,11 @@ public final class ReviewModel {
         let cal = Calendar.current
         let start = cal.startOfDay(for: day)
         let end = cal.date(byAdding: .day, value: 1, to: start)!
-        var spanSecs = 0.0
-        for s in spans {
-            let a = max(s.startedAt, start), b = min(s.endedAt, end)
-            spanSecs += max(b.timeIntervalSince(a), 0)
-        }
-        var gapSecs = 0.0
-        for g in gaps {
-            let a = max(g.startedAt, start), b = min(g.endedAt ?? end, end)
-            gapSecs += max(b.timeIntervalSince(a), 0)
-        }
-        return max(spanSecs - gapSecs, 0)
+        // Same coverage arithmetic as the evidence report: union of spans minus
+        // union of gaps, capped at now so today's cell never counts the future or
+        // projects an open gap forward. See CoverageMath.
+        return CoverageMath.totals(spans: spans, gaps: gaps, from: start, to: end, now: Date())
+            .monitoredSeconds
     }
 
     public func selectDay(_ day: Date) {
