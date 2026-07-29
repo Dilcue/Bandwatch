@@ -61,7 +61,9 @@ struct ReviewView: View {
         Task {
             do {
                 let summary = try BundleExporter.export(data, to: dest, workDir: work)
-                exportStatus = "Exported \(summary.clipsIncluded) clips (\(summary.clipsMissing) expired)."
+                exportStatus = summary.clipsMissing > 0
+                    ? "Exported \(summary.clipsIncluded) clips (\(summary.clipsMissing) missing)."
+                    : "Exported \(summary.clipsIncluded) clips."
             } catch {
                 exportStatus = "Export failed: \(error)"
             }

@@ -43,18 +43,33 @@ public enum BundleExporter {
         readmeFmt.timeZone = .current
         readmeFmt.dateFormat = "MMM d, yyyy"
         let speechNote = data.mayContainSpeech ? "\n\n\(ReportData.speechWarning)" : ""
+        // The missing count is 0 in normal use — Bandwatch never deletes or expires
+        // clips — so the summary omits it entirely unless a clip is genuinely absent
+        // (a write error during recording, a file removed outside the app, or a copy
+        // failure here). When that happens the bundle discloses it plainly rather
+        // than silently shipping fewer clips than events.
+        let missingSummary = missing > 0 ? "   Clips missing: \(missing)" : ""
+        let missingNote = missing > 0 ? """
+
+
+        Note: \(missing) event\(missing == 1 ? "" : "s") in this range \
+        \(missing == 1 ? "has" : "have") no clip in this bundle — the audio file was \
+        not found on disk or could not be copied. Bandwatch never deletes or expires \
+        clips; a missing file indicates a write error during recording or a file \
+        removed outside the app.
+        """ : ""
         let readme = """
         Bandwatch evidence bundle
         Range: \(readmeFmt.string(from: data.rangeStart)) to \(readmeFmt.string(from: data.rangeEnd))
-        Events: \(data.events.count)   Clips included: \(included)   Clips expired/not retained: \(missing)
+        Events: \(data.events.count)   Clips included: \(included)\(missingSummary)
 
         report.pdf   — formatted summary, coverage, event table, methodology
         events.csv   — every event in range
         gaps.csv     — every coverage gap in range (intervals not monitored)
-        clips/       — band-filtered audio for events whose clip is still retained
+        clips/       — band-filtered audio for the recorded events
 
         Levels are dBFS, not calibrated SPL. Audio is band-filtered. See the
-        methodology note in report.pdf.\(speechNote)
+        methodology note in report.pdf.\(speechNote)\(missingNote)
         """
         try readme.write(to: root.appendingPathComponent("README.txt"), atomically: true, encoding: .utf8)
 

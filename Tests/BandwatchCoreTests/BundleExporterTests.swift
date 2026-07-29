@@ -9,7 +9,7 @@ private func iso(_ s: String) -> Date {
 @MainActor @Test func testBundleContainsReportCSVsAndPresentClipsOnly() throws {
     let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("bwbundle-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
-    // one clip exists, one is "expired" (missing)
+    // one clip exists, one is missing (its file was never on disk)
     let clipA = tmp.appendingPathComponent("a.flac")
     try Data([1,2,3]).write(to: clipA)
     let events = [
@@ -42,7 +42,16 @@ private func iso(_ s: String) -> Date {
     #expect(files.contains { $0.hasSuffix("gaps.csv") })
     #expect(files.contains { $0.hasSuffix("README.txt") })
     #expect(files.contains { $0.hasSuffix("a.flac") })
-    #expect(files.contains { $0.hasSuffix("gone.flac") } == false)   // expired clip absent
+    #expect(files.contains { $0.hasSuffix("gone.flac") } == false)   // missing clip absent
+
+    // When a clip IS genuinely missing, the bundle discloses it plainly as
+    // "missing" (never "expired" — Bandwatch does not expire evidence).
+    let readmeRel = try #require(files.first { $0.hasSuffix("README.txt") })
+    let readmeText = try String(contentsOf: out.appendingPathComponent(readmeRel), encoding: .utf8)
+    #expect(readmeText.contains("Clips included: 1"))
+    #expect(readmeText.contains("Clips missing: 1"))
+    #expect(readmeText.lowercased().contains("expired") == false)
+    #expect(readmeText.lowercased().contains("never deletes or expires"))
 }
 
 @MainActor @Test func testSameBasenameClipsFromDifferentDirsBothIncluded() throws {
@@ -81,6 +90,14 @@ private func iso(_ s: String) -> Date {
     let files = try FileManager.default.subpathsOfDirectory(atPath: out.path)
     let clipFiles = files.filter { $0.contains("clips/") && $0.hasSuffix(".flac") }
     #expect(clipFiles.count == 2)   // both distinct-named copies present, none clobbered
+
+    // Healthy export (nothing missing): the summary omits the missing line
+    // entirely — no "missing" count and no "expired" wording on the bundle.
+    let readmeRel = try #require(files.first { $0.hasSuffix("README.txt") })
+    let readmeText = try String(contentsOf: out.appendingPathComponent(readmeRel), encoding: .utf8)
+    #expect(readmeText.contains("Clips included: 2"))
+    #expect(readmeText.contains("Clips missing") == false)
+    #expect(readmeText.lowercased().contains("expired") == false)
 }
 
 @MainActor @Test func testWorkingFolderRemovedAfterSuccessfulExport() throws {
