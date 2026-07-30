@@ -118,6 +118,47 @@ public final class CoreAudioInputDevices: InputDeviceEnumerating, @unchecked Sen
         return id
     }
 
+    /// True when the system's current default **output** device is a Multi-Output
+    /// or Aggregate device (both report the aggregate transport type). This is a
+    /// known macOS cause of input-capture stalls: AVAudioEngine still runs an
+    /// output I/O unit on the default output device even for an input-only app,
+    /// and it cannot drive an aggregate output — starving the input tap until the
+    /// stall watchdog halts monitoring. Used only to tailor the stall message.
+    /// Fails closed (false) when the default output can't be read, so we never
+    /// blame a device we did not actually confirm.
+    public static func defaultOutputIsAggregate() -> Bool {
+        guard let id = defaultOutputDeviceID(),
+              let transport = transportType(of: id) else { return false }
+        return isAggregateTransport(transport)
+    }
+
+    /// Pure transport-type classifier, factored out so the decision is testable
+    /// without real aggregate hardware.
+    static func isAggregateTransport(_ transportType: UInt32) -> Bool {
+        transportType == kAudioDeviceTransportTypeAggregate
+    }
+
+    private static func defaultOutputDeviceID() -> AudioDeviceID? {
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        var id: AudioDeviceID = 0
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        guard AudioObjectGetPropertyData(system, &addr, 0, nil, &size, &id) == noErr, id != 0 else { return nil }
+        return id
+    }
+
+    private static func transportType(of id: AudioDeviceID) -> UInt32? {
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyTransportType,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &value) == noErr else { return nil }
+        return value
+    }
+
     private static func hasInputStreams(_ id: AudioDeviceID) -> Bool {
         var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreamConfiguration,
                                               mScope: kAudioObjectPropertyScopeInput,

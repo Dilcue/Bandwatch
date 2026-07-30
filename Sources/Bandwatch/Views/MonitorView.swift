@@ -245,7 +245,11 @@ private struct StatusSection: View {
         case .engineStartFailed(let detail):
             message = "Could not start audio: \(detail)"
         case .captureStalled:
-            message = "Audio input stopped responding and monitoring has halted. Check your microphone/input device, then press Start to resume."
+            // A Multi-Output/Aggregate system output is a known macOS cause of
+            // this stall; when that's the case, name it instead of pointing the
+            // user at a microphone that is working fine.
+            message = CaptureStallAdvice.message(
+                defaultOutputIsAggregate: CoreAudioInputDevices.defaultOutputIsAggregate())
         }
         return Text(message)
             .font(.callout)
